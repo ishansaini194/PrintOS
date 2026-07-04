@@ -1,0 +1,5 @@
+# Local environment (real secrets/values — never commit)
+.env
+
+# Local agent SQLite database
+printos-agent.db
