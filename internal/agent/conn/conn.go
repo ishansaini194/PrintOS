@@ -1,7 +1,6 @@
-package conn
-
 // Package conn is the agent's outbound pull connection to the cloud.
 // The agent dials OUT and holds the connection; it never accepts inbound.
+package conn
 
 import (
 	"encoding/json"
@@ -18,15 +17,22 @@ type Handler func(protocol.Envelope) error
 
 // Conn is a single logical connection to the cloud, with auto-reconnect.
 type Conn struct {
-	url     string
-	handler Handler
-	ws      *websocket.Conn
+	url       string
+	handler   Handler
+	onConnect func() // called after each successful (re)connect
+	ws        *websocket.Conn
 }
 
 // New creates a Conn. url is the cloud WebSocket endpoint; handler is called
 // for every envelope received.
 func New(url string, handler Handler) *Conn {
 	return &Conn{url: url, handler: handler}
+}
+
+// OnConnect sets a hook run right after each successful (re)connect — used to
+// send the hello message identifying the shop.
+func (c *Conn) OnConnect(fn func()) {
+	c.onConnect = fn
 }
 
 // Run dials the cloud and reads until the connection drops, then reconnects
@@ -69,6 +75,10 @@ func (c *Conn) dialAndRead(stop <-chan struct{}) error {
 		ws.Close()
 		c.ws = nil
 	}()
+
+	if c.onConnect != nil {
+		c.onConnect() // send hello, etc.
+	}
 
 	for {
 		select {

@@ -9,8 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/joho/godotenv"
-
 	"github.com/ishansaini194/PrintOS/internal/agent"
 	"github.com/ishansaini194/PrintOS/internal/agent/printer"
 	"github.com/ishansaini194/PrintOS/internal/agent/queue"
@@ -18,12 +16,10 @@ import (
 )
 
 func main() {
-	// Load .env into the process environment (no-op if the file is absent).
-	_ = godotenv.Load()
-
 	cfg := agent.Config{
 		CloudWSURL:   env("PRINTOS_CLOUD_WS", "ws://localhost:8080/agent"),
 		UpdateURL:    env("PRINTOS_UPDATE_URL", "http://localhost:8080/agent/latest"),
+		ShopID:       env("PRINTOS_SHOP_ID", "test-shop"),
 		PrinterName:  env("PRINTOS_PRINTER", ""),
 		Version:      protocol.Version,
 		HeartbeatInt: 45 * time.Second,

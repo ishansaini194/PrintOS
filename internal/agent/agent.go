@@ -19,6 +19,7 @@ import (
 type Config struct {
 	CloudWSURL   string        // pull-connection endpoint
 	UpdateURL    string        // updater check endpoint
+	ShopID       string        // this shop's identifier (sent on connect)
 	PrinterName  string        // target printer
 	Version      string        // this build's version
 	HeartbeatInt time.Duration // heartbeat interval
@@ -37,7 +38,14 @@ type Agent struct {
 func New(cfg Config, q *queue.Queue, p *printer.Printer) *Agent {
 	a := &Agent{cfg: cfg, queue: q, printer: p}
 	a.conn = conn.New(cfg.CloudWSURL, a.handle)
+	a.conn.OnConnect(a.sendHello)
 	return a
+}
+
+// sendHello identifies this shop to the cloud right after connecting.
+func (a *Agent) sendHello() {
+	payload, _ := json.Marshal(protocol.HelloMsg{ShopID: a.cfg.ShopID})
+	_ = a.conn.Send(a.envelope(protocol.MsgHello, payload))
 }
 
 // Run starts the connection, heartbeat and updater, and blocks until stop.
