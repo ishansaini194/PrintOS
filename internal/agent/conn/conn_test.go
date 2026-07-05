@@ -102,6 +102,45 @@ func TestSendNotConnected(t *testing.T) {
 	}
 }
 
+func TestStopUnblocksBlockingRead(t *testing.T) {
+	// Server accepts the connection and holds it open — never sending anything
+	// and never closing it first. So the agent can only stop via its own stop
+	// signal unblocking the otherwise-blocking ReadMessage.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		// Block until the client goes away (ReadMessage returns an error).
+		for {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	c := New(wsURL(srv.URL), func(protocol.Envelope) error { return nil })
+	stop := make(chan struct{})
+	returned := make(chan struct{})
+	go func() {
+		c.Run(stop)
+		close(returned)
+	}()
+
+	// Let the connection establish so the read loop is blocked on ReadMessage.
+	time.Sleep(200 * time.Millisecond)
+
+	close(stop)
+	select {
+	case <-returned:
+		// Good: Run returned promptly after stop, without the server closing first.
+	case <-time.After(1 * time.Second):
+		t.Fatal("Run did not return within 1s after stop closed")
+	}
+}
+
 func TestReconnectsAfterDrop(t *testing.T) {
 	var conns int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

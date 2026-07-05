@@ -76,6 +76,19 @@ func (c *Conn) dialAndRead(stop <-chan struct{}) error {
 		c.ws = nil
 	}()
 
+	// Unblock the blocking ReadMessage below when stop fires: closing the socket
+	// makes ReadMessage return an error so the read loop exits promptly. done is
+	// closed when dialAndRead returns, so this goroutine never leaks on reconnect.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-stop:
+			ws.Close()
+		case <-done:
+		}
+	}()
+
 	if c.onConnect != nil {
 		c.onConnect() // send hello, etc.
 	}
