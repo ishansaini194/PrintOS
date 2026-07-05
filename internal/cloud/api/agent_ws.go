@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -12,52 +13,47 @@ import (
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
 
-// hub tracks the currently connected agent socket so the cloud can push jobs.
-// (v1: single agent for testing. A shop registry comes later.)
-var hub = struct {
-	mu   sync.Mutex
-	conn *websocket.Conn
-}{}
+// registry maps shopID → connected agent socket, so jobs route to the right shop.
+var registry = struct {
+	mu    sync.Mutex
+	conns map[string]*websocket.Conn
+}{conns: make(map[string]*websocket.Conn)}
 
-func setAgent(c *websocket.Conn) {
-	hub.mu.Lock()
-	hub.conn = c
-	hub.mu.Unlock()
+func register(shopID string, c *websocket.Conn) {
+	registry.mu.Lock()
+	registry.conns[shopID] = c
+	registry.mu.Unlock()
 }
 
-func clearAgent() {
-	hub.mu.Lock()
-	hub.conn = nil
-	hub.mu.Unlock()
+func unregister(shopID string) {
+	registry.mu.Lock()
+	delete(registry.conns, shopID)
+	registry.mu.Unlock()
 }
 
-// PushToAgent sends an envelope down the connected agent socket.
-func PushToAgent(env protocol.Envelope) error {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	if hub.conn == nil {
-		return errNoAgent
+// PushToAgent sends an envelope to a specific shop's agent.
+func PushToAgent(shopID string, env protocol.Envelope) error {
+	registry.mu.Lock()
+	c := registry.conns[shopID]
+	registry.mu.Unlock()
+	if c == nil {
+		return fmt.Errorf("shop %s not connected", shopID)
 	}
 	data, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
-	return hub.conn.WriteMessage(websocket.TextMessage, data)
+	return c.WriteMessage(websocket.TextMessage, data)
 }
-
-var errNoAgent = &noAgentErr{}
-
-type noAgentErr struct{}
-
-func (e *noAgentErr) Error() string { return "no agent connected" }
 
 // AgentSocket handles one connected agent's WebSocket.
 func AgentSocket(c *websocket.Conn) {
-	log.Println("agent connected")
-	setAgent(c)
+	shopID := "" // set once the hello message arrives
 	defer func() {
-		log.Println("agent disconnected")
-		clearAgent()
+		if shopID != "" {
+			log.Printf("agent disconnected: shop=%s", shopID)
+			unregister(shopID)
+		}
 		c.Close()
 	}()
 
@@ -70,39 +66,58 @@ func AgentSocket(c *websocket.Conn) {
 		if err := json.Unmarshal(data, &env); err != nil {
 			continue
 		}
-		handleEnvelope(env)
+
+		// First real message must be hello; register the shop.
+		if env.Type == protocol.MsgHello {
+			var m protocol.HelloMsg
+			if json.Unmarshal(env.Payload, &m) == nil && m.ShopID != "" {
+				shopID = m.ShopID
+				register(shopID, c)
+				log.Printf("agent connected: shop=%s", shopID)
+			}
+			continue
+		}
+
+		handleEnvelope(shopID, env)
 	}
 }
 
-func handleEnvelope(env protocol.Envelope) {
+func handleEnvelope(shopID string, env protocol.Envelope) {
 	switch env.Type {
 	case protocol.MsgHeartbeat:
 		var m protocol.HeartbeatMsg
 		if json.Unmarshal(env.Payload, &m) == nil {
-			log.Printf("heartbeat: v%s printer=%s queue=%d", m.AgentVersion, m.PrinterStatus, m.QueueDepth)
+			log.Printf("[%s] heartbeat: v%s printer=%s queue=%d", shopID, m.AgentVersion, m.PrinterStatus, m.QueueDepth)
 		}
 	case protocol.MsgJobAck:
 		var m protocol.JobAckMsg
 		if json.Unmarshal(env.Payload, &m) == nil {
-			log.Printf("ack: job=%s duplicate=%v", m.JobID, m.Duplicate)
+			log.Printf("[%s] ack: job=%s duplicate=%v", shopID, m.JobID, m.Duplicate)
 		}
 	case protocol.MsgStatus:
 		var m protocol.StatusMsg
 		if json.Unmarshal(env.Payload, &m) == nil {
-			log.Printf("status: job=%s state=%s", m.JobID, m.State)
+			log.Printf("[%s] status: job=%s state=%s", shopID, m.JobID, m.State)
 		}
 	default:
-		log.Printf("unknown message type: %s", env.Type)
+		log.Printf("[%s] unknown message type: %s", shopID, env.Type)
 	}
 }
 
-// TestPushJob builds a sample job and pushes it to the connected agent.
-// For wiring tests only — real job creation comes from payment later.
-func TestPushJob() error {
+// TestPushJob builds a sample job and pushes it to the given shop's agent.
+// If key is non-empty it's used as the idempotency key (pass the same key
+// twice to test the duplicate guard).
+func TestPushJob(shopID, key string) error {
+	if shopID == "" {
+		shopID = "test-shop"
+	}
+	if key == "" {
+		key = "idem-" + time.Now().Format("150405.000")
+	}
 	job := protocol.Job{
-		ID:             "test-" + time.Now().Format("150405"),
-		ShopID:         "test-shop",
-		IdempotencyKey: "idem-" + time.Now().Format("150405.000"),
+		ID:             "test-" + time.Now().Format("150405.000"),
+		ShopID:         shopID,
+		IdempotencyKey: key,
 		Mode:           protocol.ModePrintNow,
 		ClaimCode:      "A7",
 		PDFURL:         "test.pdf",
@@ -111,7 +126,7 @@ func TestPushJob() error {
 		ExpiresAt:      time.Now().Add(2 * time.Hour).UTC(),
 	}
 	payload, _ := json.Marshal(protocol.JobPushMsg{Job: job})
-	return PushToAgent(protocol.Envelope{
+	return PushToAgent(shopID, protocol.Envelope{
 		Type:            protocol.MsgJobPush,
 		ProtocolVersion: protocol.Version,
 		SentAt:          time.Now().UTC(),

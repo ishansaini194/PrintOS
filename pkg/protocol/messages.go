@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// MessageType tags every message on the wire. v1 has NO release message.
 type MessageType string
 
 const (
@@ -14,6 +15,7 @@ const (
 	MsgUpdateNow MessageType = "update_now"
 
 	// Agent → Cloud
+	MsgHello     MessageType = "hello" // agent identifies its shop on connect
 	MsgJobAck    MessageType = "job_ack"
 	MsgStatus    MessageType = "status"
 	MsgHeartbeat MessageType = "heartbeat"
@@ -22,6 +24,7 @@ const (
 	MsgReportProblem MessageType = "report_problem"
 )
 
+// Envelope wraps every message so the receiver can dispatch on Type and reject
 // mismatched protocol versions.
 type Envelope struct {
 	Type            MessageType     `json:"type"`
@@ -44,16 +47,24 @@ type ResolveMsg struct {
 
 // --- Agent → Cloud ---
 
+// HelloMsg is the first message an agent sends after connecting, identifying
+// which shop it is. Token is reserved for authentication (empty in v1).
+type HelloMsg struct {
+	ShopID string `json:"shop_id"`
+	Token  string `json:"token,omitempty"`
+}
+
+// JobAckMsg confirms the agent wrote the job to disk BEFORE printing.
 type JobAckMsg struct {
 	JobID          string `json:"job_id"`
 	IdempotencyKey string `json:"idempotency_key"`
-	Duplicate      bool   `json:"duplicate"`
+	Duplicate      bool   `json:"duplicate"` // already seen → acked, not reprinted
 }
 
 type StatusMsg struct {
 	JobID  string    `json:"job_id"`
 	State  JobState  `json:"state"`
-	Detail string    `json:"detail,omitempty"`
+	Detail string    `json:"detail,omitempty"` // spooler reason on failure
 	At     time.Time `json:"at"`
 }
 

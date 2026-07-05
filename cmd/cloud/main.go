@@ -53,7 +53,7 @@ func main() {
 
 	// Test-only: push a sample job to the connected agent.
 	app.Post("/test/job", func(c *fiber.Ctx) error {
-		if err := api.TestPushJob(); err != nil {
+		if err := api.TestPushJob(c.Query("shop"), c.Query("key")); err != nil {
 			return c.Status(503).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"pushed": true})
