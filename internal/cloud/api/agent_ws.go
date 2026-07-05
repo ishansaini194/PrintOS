@@ -2,9 +2,12 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -12,6 +15,9 @@ import (
 
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
+
+// testPDFPath is the fixed PDF served at /jobs/:id/pdf until real storage exists.
+const testPDFPath = "testdata/sample.pdf"
 
 // registry maps shopID → connected agent socket, so jobs route to the right shop.
 var registry = struct {
@@ -114,13 +120,15 @@ func TestPushJob(shopID, key string) error {
 	if key == "" {
 		key = "idem-" + time.Now().Format("150405.000")
 	}
+	jobID := "test-" + time.Now().Format("150405.000")
 	job := protocol.Job{
-		ID:             "test-" + time.Now().Format("150405.000"),
+		ID:             jobID,
 		ShopID:         shopID,
 		IdempotencyKey: key,
 		Mode:           protocol.ModePrintNow,
 		ClaimCode:      "A7",
-		PDFURL:         "test.pdf",
+		PDFURL:         publicURL() + "/jobs/" + jobID + "/pdf",
+		PDFSHA256:      samplePDFSHA(),
 		Settings:       protocol.PrintSettings{Color: protocol.ColorMono, Copies: 1, PaperSize: "A4"},
 		CreatedAt:      time.Now().UTC(),
 		ExpiresAt:      time.Now().Add(2 * time.Hour).UTC(),
@@ -132,4 +140,23 @@ func TestPushJob(shopID, key string) error {
 		SentAt:          time.Now().UTC(),
 		Payload:         payload,
 	})
+}
+
+// publicURL is the base URL the agent uses to reach the cloud for downloads.
+func publicURL() string {
+	if v := os.Getenv("PRINTOS_PUBLIC_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// samplePDFSHA returns the sha256 of the served test PDF so the agent's checksum
+// check matches. Returns "" (skip checksum) if the file can't be read.
+func samplePDFSHA() string {
+	data, err := os.ReadFile(testPDFPath)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

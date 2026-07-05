@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ishansaini194/PrintOS/internal/agent/conn"
+	"github.com/ishansaini194/PrintOS/internal/agent/download"
 	"github.com/ishansaini194/PrintOS/internal/agent/health"
 	"github.com/ishansaini194/PrintOS/internal/agent/printer"
 	"github.com/ishansaini194/PrintOS/internal/agent/queue"
@@ -84,10 +85,20 @@ func (a *Agent) processJob(job protocol.Job) {
 		return
 	}
 
-	// 2. Print. (PDF is assumed already fetched to job.PDFURL's local path.)
-	state, _ := a.printer.Print(job.PDFURL, a.cfg.PrinterName)
+	// 2. Download the PDF to a local temp file (verifying its checksum) before
+	// handing it to the printer.
+	path, cleanup, err := download.ToTempFile(job.PDFURL, job.PDFSHA256)
+	if err != nil {
+		_ = a.queue.SetState(job.ID, protocol.StateFailed)
+		a.sendStatus(job.ID, protocol.StateFailed)
+		return
+	}
+	defer cleanup()
 
-	// 3. Record and report the outcome.
+	// 3. Print the downloaded local file.
+	state, _ := a.printer.Print(path, a.cfg.PrinterName)
+
+	// 4. Record and report the outcome.
 	_ = a.queue.SetState(job.ID, state)
 	a.sendStatus(job.ID, state)
 }

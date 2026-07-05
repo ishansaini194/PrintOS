@@ -55,6 +55,12 @@ func registerRoutes(srv *server.Server) {
 	})
 	app.Get("/agent", websocket.New(api.AgentSocket))
 
+	// Job PDF download. No storage yet: serve a fixed test PDF. The :id param
+	// is kept so this becomes a real per-job lookup later without a shape change.
+	app.Get("/jobs/:id/pdf", func(c *fiber.Ctx) error {
+		return c.SendFile("testdata/sample.pdf")
+	})
+
 	// Test-only: push a sample job to the connected agent.
 	app.Post("/test/job", func(c *fiber.Ctx) error {
 		if err := api.TestPushJob(c.Query("shop"), c.Query("key")); err != nil {
