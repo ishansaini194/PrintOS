@@ -17,6 +17,7 @@ type fakeShops struct {
 	consumed  bool   // whether Consume has already succeeded once
 	lastHash  string // token hash passed to the last successful Consume
 	tokenHash string // value returned by TokenHash
+	active    bool   // value returned by IsActive
 }
 
 func (f *fakeShops) Create(name, setupCode string) (string, error) {
@@ -36,9 +37,13 @@ func (f *fakeShops) TokenHash(shopID string) (string, error) {
 	return f.tokenHash, nil
 }
 
+func (f *fakeShops) IsActive(shopID string) (bool, error) {
+	return f.active, nil
+}
+
 func provisionApp(shops Shops) *fiber.App {
 	app := fiber.New()
-	h := NewHandlers(shops)
+	h := NewHandlers(shops, nil)
 	app.Post("/agent/provision", h.Provision)
 	return app
 }

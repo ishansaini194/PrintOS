@@ -6,3 +6,6 @@ printos-agent.db
 
 # Agent auth token, written on first provision — never commit
 printos-token
+
+# Stored job PDFs (customer uploads) — never commit
+uploads/

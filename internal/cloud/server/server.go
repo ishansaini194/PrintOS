@@ -14,9 +14,15 @@ type Server struct {
 	DB  *gorm.DB
 }
 
-// New creates a Server with a fresh Fiber app.
+// New creates a Server with a fresh Fiber app. BodyLimit is raised well above
+// the 50MB upload cap (the authoritative size check lives in the upload
+// handler / render) so large uploads reach the handler instead of being
+// rejected by Fiber's 4MB default.
 func New(db *gorm.DB) *Server {
-	return &Server{App: fiber.New(), DB: db}
+	app := fiber.New(fiber.Config{
+		BodyLimit: 64 << 20, // 64MB
+	})
+	return &Server{App: app, DB: db}
 }
 
 // Start reads PORT (default "8080") and listens.

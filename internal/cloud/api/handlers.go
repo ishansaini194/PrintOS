@@ -5,28 +5,40 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/ishansaini194/PrintOS/internal/cloud/store"
 )
 
-// Shops is the subset of store operations the auth handlers and the hello
-// verification need. Keeping it an interface lets the handlers be unit-tested
-// with a fake, without a live database.
+// Shops is the subset of store operations the auth handlers, hello verification,
+// and upload need. Keeping it an interface lets the handlers be unit-tested with
+// a fake, without a live database.
 type Shops interface {
 	Create(name, setupCode string) (shopID string, err error)
 	Consume(setupCode, tokenHash string) (shopID string, err error)
 	TokenHash(shopID string) (string, error)
+	IsActive(shopID string) (bool, error)
+}
+
+// Jobs is the subset of job-store operations the upload handler and status
+// updates need.
+type Jobs interface {
+	Create(shopID, idempotencyKey, claimCode string, expires time.Time) (store.Job, error)
+	SetState(id, state string) error
 }
 
 // Handlers bundles the DB-backed HTTP/WebSocket handlers.
 type Handlers struct {
 	shops Shops
+	jobs  Jobs
 }
 
-// NewHandlers builds the handler set over a Shops store.
-func NewHandlers(shops Shops) *Handlers { return &Handlers{shops: shops} }
+// NewHandlers builds the handler set over the shop and job stores.
+func NewHandlers(shops Shops, jobs Jobs) *Handlers {
+	return &Handlers{shops: shops, jobs: jobs}
+}
 
 // CreateShop provisions a new shop and returns its one-time setup code.
 // TODO: this admin route is operator-only and currently unauthenticated.

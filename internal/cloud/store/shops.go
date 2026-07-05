@@ -62,3 +62,16 @@ func (s *Shops) TokenHash(shopID string) (string, error) {
 	}
 	return hash, nil
 }
+
+// IsActive reports whether a shop exists and is active. Unknown shop → false;
+// an invalid shop id surfaces as an error.
+func (s *Shops) IsActive(shopID string) (bool, error) {
+	var active bool
+	err := s.db.Raw(
+		`SELECT COALESCE(is_active, false) FROM shops WHERE id = ?`, shopID,
+	).Scan(&active).Error
+	if err != nil {
+		return false, err
+	}
+	return active, nil
+}

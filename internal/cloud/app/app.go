@@ -4,6 +4,7 @@ package app
 
 import (
 	"log"
+	"os"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
@@ -31,7 +32,7 @@ func New() (*server.Server, error) {
 
 	// 3. Build the server and register routes.
 	srv := server.New(db)
-	h := api.NewHandlers(store.NewShops(db))
+	h := api.NewHandlers(store.NewShops(db), store.NewJobStore(db))
 	registerRoutes(srv, h)
 	return srv, nil
 }
@@ -54,6 +55,9 @@ func registerRoutes(srv *server.Server, h *api.Handlers) {
 	// Agent provisioning: exchange a setup code for a long-lived token.
 	app.Post("/agent/provision", h.Provision)
 
+	// Customer upload: file → clean PDF → job → push to the shop's agent.
+	app.Post("/upload", h.Upload)
+
 	// Agent pull-connection: only allow WebSocket upgrades here.
 	app.Use("/agent", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -63,17 +67,13 @@ func registerRoutes(srv *server.Server, h *api.Handlers) {
 	})
 	app.Get("/agent", websocket.New(h.AgentSocket))
 
-	// Job PDF download. No storage yet: serve a fixed test PDF. The :id param
-	// is kept so this becomes a real per-job lookup later without a shape change.
+	// Job PDF download: serve the stored <job_id>.pdf from local disk. 404 if
+	// missing. The agent fetches this URL to print.
 	app.Get("/jobs/:id/pdf", func(c *fiber.Ctx) error {
-		return c.SendFile("testdata/sample.pdf")
-	})
-
-	// Test-only: push a sample job to the connected agent.
-	app.Post("/test/job", func(c *fiber.Ctx) error {
-		if err := api.TestPushJob(c.Query("shop"), c.Query("key")); err != nil {
-			return c.Status(503).JSON(fiber.Map{"error": err.Error()})
+		path := api.PDFPath(c.Params("id"))
+		if _, err := os.Stat(path); err != nil {
+			return c.SendStatus(fiber.StatusNotFound)
 		}
-		return c.JSON(fiber.Map{"pushed": true})
+		return c.SendFile(path)
 	})
 }
