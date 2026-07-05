@@ -31,12 +31,13 @@ func New() (*server.Server, error) {
 
 	// 3. Build the server and register routes.
 	srv := server.New(db)
-	registerRoutes(srv)
+	h := api.NewHandlers(store.NewShops(db))
+	registerRoutes(srv, h)
 	return srv, nil
 }
 
 // registerRoutes mounts all HTTP/WebSocket endpoints on the server.
-func registerRoutes(srv *server.Server) {
+func registerRoutes(srv *server.Server, h *api.Handlers) {
 	app := srv.App
 
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -46,6 +47,12 @@ func registerRoutes(srv *server.Server) {
 		})
 	})
 
+	// Admin (operator-only): create a shop, get its one-time setup code.
+	app.Post("/admin/shops", h.CreateShop)
+
+	// Agent provisioning: exchange a setup code for a long-lived token.
+	app.Post("/agent/provision", h.Provision)
+
 	// Agent pull-connection: only allow WebSocket upgrades here.
 	app.Use("/agent", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -53,7 +60,7 @@ func registerRoutes(srv *server.Server) {
 		}
 		return fiber.ErrUpgradeRequired
 	})
-	app.Get("/agent", websocket.New(api.AgentSocket))
+	app.Get("/agent", websocket.New(h.AgentSocket))
 
 	// Job PDF download. No storage yet: serve a fixed test PDF. The :id param
 	// is kept so this becomes a real per-job lookup later without a shape change.

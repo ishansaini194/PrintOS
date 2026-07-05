@@ -9,17 +9,34 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/ishansaini194/PrintOS/internal/agent"
+	"github.com/ishansaini194/PrintOS/internal/agent/auth"
 	"github.com/ishansaini194/PrintOS/internal/agent/printer"
 	"github.com/ishansaini194/PrintOS/internal/agent/queue"
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
 
 func main() {
+	// Load .env into the process environment (no-op if the file is absent).
+	_ = godotenv.Load()
+
+	// Provision on first run (setup code → token), then reuse the saved token.
+	shopID, token, err := auth.EnsureToken(
+		env("PRINTOS_PROVISION_URL", "http://localhost:8080/agent/provision"),
+		os.Getenv("PRINTOS_SETUP_CODE"),
+		env("PRINTOS_TOKEN_FILE", "printos-token"),
+	)
+	if err != nil {
+		log.Fatalf("provision: %v", err)
+	}
+
 	cfg := agent.Config{
 		CloudWSURL:   env("PRINTOS_CLOUD_WS", "ws://localhost:8080/agent"),
 		UpdateURL:    env("PRINTOS_UPDATE_URL", "http://localhost:8080/agent/latest"),
-		ShopID:       env("PRINTOS_SHOP_ID", "test-shop"),
+		ShopID:       shopID,
+		Token:        token,
 		PrinterName:  env("PRINTOS_PRINTER", ""),
 		Version:      protocol.Version,
 		HeartbeatInt: 45 * time.Second,

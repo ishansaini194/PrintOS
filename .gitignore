@@ -3,3 +3,6 @@
 
 # Local agent SQLite database
 printos-agent.db
+
+# Agent auth token, written on first provision — never commit
+printos-token

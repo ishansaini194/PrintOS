@@ -53,8 +53,8 @@ func PushToAgent(shopID string, env protocol.Envelope) error {
 }
 
 // AgentSocket handles one connected agent's WebSocket.
-func AgentSocket(c *websocket.Conn) {
-	shopID := "" // set once the hello message arrives
+func (h *Handlers) AgentSocket(c *websocket.Conn) {
+	shopID := "" // set once a valid hello message arrives
 	defer func() {
 		if shopID != "" {
 			log.Printf("agent disconnected: shop=%s", shopID)
@@ -73,14 +73,20 @@ func AgentSocket(c *websocket.Conn) {
 			continue
 		}
 
-		// First real message must be hello; register the shop.
+		// First real message must be a hello with a valid token. Anything else
+		// (bad token, unknown shop) is rejected by closing the socket.
 		if env.Type == protocol.MsgHello {
 			var m protocol.HelloMsg
-			if json.Unmarshal(env.Payload, &m) == nil && m.ShopID != "" {
-				shopID = m.ShopID
-				register(shopID, c)
-				log.Printf("agent connected: shop=%s", shopID)
+			if json.Unmarshal(env.Payload, &m) != nil {
+				continue
 			}
+			if !h.verifyToken(m.ShopID, m.Token) {
+				log.Printf("agent rejected: shop=%s (bad or missing token)", m.ShopID)
+				return
+			}
+			shopID = m.ShopID
+			register(shopID, c)
+			log.Printf("agent connected: shop=%s", shopID)
 			continue
 		}
 
