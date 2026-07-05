@@ -82,6 +82,22 @@ cd printos
 go mod download
 ```
 
+### Cloud host prerequisites (file normalization)
+
+The cloud converts any accepted upload into one clean, optimized PDF. This needs
+these system tools installed on the cloud host:
+
+| Tool | Package | Purpose |
+|------|---------|---------|
+| `gs` | Ghostscript | optimize/standardize PDFs |
+| `soffice` | LibreOffice | Office/text/image → PDF |
+| `heif-convert` or `convert` | libheif-examples / ImageMagick | HEIC (iPhone) → JPG/PNG |
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install -y ghostscript libreoffice libheif-examples imagemagick
+```
+
 Build order (per the agent reliability core):
 
 1. Pull-connection + polling fallback
