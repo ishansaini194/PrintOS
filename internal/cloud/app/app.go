@@ -47,8 +47,9 @@ func registerRoutes(srv *server.Server, h *api.Handlers) {
 		})
 	})
 
-	// Admin (operator-only): create a shop, get its one-time setup code.
-	app.Post("/admin/shops", h.CreateShop)
+	// Admin (operator-only): gated behind the X-Admin-Key secret.
+	admin := app.Group("/admin", api.AdminAuth())
+	admin.Post("/shops", h.CreateShop) // create a shop, get its one-time setup code
 
 	// Agent provisioning: exchange a setup code for a long-lived token.
 	app.Post("/agent/provision", h.Provision)
