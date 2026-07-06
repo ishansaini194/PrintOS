@@ -14,6 +14,7 @@ import (
 	"github.com/ishansaini194/PrintOS/internal/agent"
 	"github.com/ishansaini194/PrintOS/internal/agent/auth"
 	"github.com/ishansaini194/PrintOS/internal/agent/printer"
+	"github.com/ishansaini194/PrintOS/internal/agent/printerinfo"
 	"github.com/ishansaini194/PrintOS/internal/agent/queue"
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
@@ -21,6 +22,13 @@ import (
 func main() {
 	// Load .env into the process environment (no-op if the file is absent).
 	_ = godotenv.Load()
+
+	// Detect + tag printer info on first run; later runs load printers.json silently.
+	printerList, err := printerinfo.LoadOrTag(env("PRINTOS_PRINTERS_FILE", "printers.json"))
+	if err != nil {
+		log.Fatalf("printers: %v", err)
+	}
+	log.Printf("loaded %d printers: %v", len(printerList), printerList)
 
 	// Provision on first run (setup code → token), then reuse the saved token.
 	shopID, token, err := auth.EnsureToken(

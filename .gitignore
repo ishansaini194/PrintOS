@@ -7,5 +7,8 @@ printos-agent.db
 # Agent auth token, written on first provision — never commit
 printos-token
 
+# Per-machine detected printers + tags, written on first run
+printers.json
+
 # Stored job PDFs (customer uploads) — never commit
 uploads/
