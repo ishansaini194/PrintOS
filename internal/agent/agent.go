@@ -4,17 +4,25 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"log"
+	"sync"
 	"time"
 
 	"github.com/ishansaini194/PrintOS/internal/agent/conn"
 	"github.com/ishansaini194/PrintOS/internal/agent/download"
 	"github.com/ishansaini194/PrintOS/internal/agent/health"
 	"github.com/ishansaini194/PrintOS/internal/agent/printer"
+	"github.com/ishansaini194/PrintOS/internal/agent/printerinfo"
 	"github.com/ishansaini194/PrintOS/internal/agent/queue"
 	"github.com/ishansaini194/PrintOS/internal/agent/updater"
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
+
+// workerPoll is how long a worker waits before re-checking the queue when it
+// finds no job of its type.
+const workerPoll = 500 * time.Millisecond
 
 // Config holds everything the agent needs to start.
 type Config struct {
@@ -22,7 +30,6 @@ type Config struct {
 	UpdateURL    string        // updater check endpoint
 	ShopID       string        // this shop's identifier (sent on connect)
 	Token        string        // auth token proving this shop (sent on connect)
-	PrinterName  string        // target printer
 	Version      string        // this build's version
 	HeartbeatInt time.Duration // heartbeat interval
 	UpdateInt    time.Duration // update-check interval
@@ -30,15 +37,17 @@ type Config struct {
 
 // Agent is the running coordinator.
 type Agent struct {
-	cfg     Config
-	queue   *queue.Queue
-	conn    *conn.Conn
-	printer *printer.Printer
+	cfg      Config
+	queue    *queue.Queue
+	conn     *conn.Conn
+	printer  *printer.Printer
+	printers []printerinfo.Printer // one worker is run per printer
 }
 
-// New builds an Agent from its parts.
-func New(cfg Config, q *queue.Queue, p *printer.Printer) *Agent {
-	a := &Agent{cfg: cfg, queue: q, printer: p}
+// New builds an Agent from its parts. printers is the tagged printer list; the
+// agent runs one worker goroutine per printer, each pulling only its own type.
+func New(cfg Config, q *queue.Queue, p *printer.Printer, printers []printerinfo.Printer) *Agent {
+	a := &Agent{cfg: cfg, queue: q, printer: p, printers: printers}
 	a.conn = conn.New(cfg.CloudWSURL, a.handle)
 	a.conn.OnConnect(a.sendHello)
 	return a
@@ -50,7 +59,9 @@ func (a *Agent) sendHello() {
 	_ = a.conn.Send(a.envelope(protocol.MsgHello, payload))
 }
 
-// Run starts the connection, heartbeat and updater, and blocks until stop.
+// Run starts the connection, heartbeat, updater and one worker per printer, and
+// blocks until stop. On stop it cancels every worker and waits for them to drain
+// so shutdown leaves no goroutine mid-print.
 func (a *Agent) Run(stop <-chan struct{}) {
 	hb := health.New(a.conn, a.cfg.HeartbeatInt, a.cfg.Version,
 		func() protocol.PrinterStatus { return protocol.PrinterReady }, // TODO real status
@@ -61,7 +72,64 @@ func (a *Agent) Run(stop <-chan struct{}) {
 	go hb.Run(stop)
 	go up.Run(stop, func() { /* TODO trigger restart */ })
 
+	// Derive a context cancelled when stop closes, then fan it out to one worker
+	// per printer. Each worker pulls only jobs of its own type, so N printers of
+	// the same type naturally load-balance and all can print concurrently.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-stop
+		cancel()
+	}()
+
+	var wg sync.WaitGroup
+	for _, p := range a.printers {
+		wg.Add(1)
+		go func(p printerinfo.Printer) {
+			defer wg.Done()
+			a.worker(ctx, p)
+		}(p)
+	}
+
 	a.conn.Run(stop) // blocks until stop
+	cancel()         // belt-and-suspenders: unblock workers even if stop is already handled
+	wg.Wait()        // no leaked worker goroutines past shutdown
+}
+
+// worker is one printer's loop: claim the next job of this printer's type, print
+// it on THIS printer, repeat. It exits promptly when ctx is cancelled.
+func (a *Agent) worker(ctx context.Context, p printerinfo.Printer) {
+	for {
+		job, err := a.queue.GetNext(ctx, p.Type)
+		if err != nil {
+			if ctx.Err() != nil {
+				return // shutting down; GetNext was cancelled
+			}
+			log.Printf("worker %s: claim job: %v", p.Name, err)
+			if !sleepOrDone(ctx, workerPoll) {
+				return
+			}
+			continue
+		}
+		if job == nil {
+			if !sleepOrDone(ctx, workerPoll) { // nothing waiting for this type
+				return
+			}
+			continue
+		}
+		a.printJob(*job, p.Name)
+	}
+}
+
+// sleepOrDone waits for d or until ctx is cancelled. It returns false if ctx was
+// cancelled (caller should stop), true if the delay elapsed.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
 }
 
 // handle dispatches an incoming envelope from the cloud.
@@ -71,22 +139,34 @@ func (a *Agent) handle(env protocol.Envelope) error {
 		if err := json.Unmarshal(env.Payload, &msg); err != nil {
 			return err
 		}
-		a.processJob(msg.Job)
+		a.persistJob(msg.Job)
 	}
 	return nil
 }
 
-// processJob runs the job lifecycle: persist → ack → print → report status.
-func (a *Agent) processJob(job protocol.Job) {
-	// 1. Persist BEFORE printing. Duplicate key → ack, do not reprint.
+// persistJob writes a pushed job to the queue and acks it. It does NOT print —
+// a per-printer worker later claims the job via GetNext and prints it. This
+// preserves write-before-print: the durable record exists before any print.
+func (a *Agent) persistJob(job protocol.Job) {
 	err := a.queue.Enqueue(job)
-	dup := err == queue.ErrDuplicate
-	a.sendAck(job, dup)
-	if dup {
-		return
+	switch {
+	case err == queue.ErrDuplicate:
+		a.sendAck(job, true) // already seen → ack, do not requeue/reprint
+	case err != nil:
+		// A real persist failure (e.g. disk error): we can't safely print a job
+		// we didn't record, so surface it. Ack as non-duplicate so the cloud
+		// isn't told it was deduped.
+		log.Printf("persist job %s: %v", job.ID, err)
+		a.sendAck(job, false)
+	default:
+		a.sendAck(job, false)
 	}
+}
 
-	// 2. Download the PDF to a local temp file (verifying its checksum) before
+// printJob runs the print half of the lifecycle for an already-claimed job:
+// download + verify checksum → print on printerName → record and report status.
+func (a *Agent) printJob(job protocol.Job, printerName string) {
+	// Download the PDF to a local temp file (verifying its checksum) before
 	// handing it to the printer.
 	path, cleanup, err := download.ToTempFile(job.PDFURL, job.PDFSHA256)
 	if err != nil {
@@ -96,10 +176,10 @@ func (a *Agent) processJob(job protocol.Job) {
 	}
 	defer cleanup()
 
-	// 3. Print the downloaded local file.
-	state, _ := a.printer.Print(path, a.cfg.PrinterName)
+	// Print the downloaded file on THIS worker's printer.
+	state, _ := a.printer.Print(path, printerName)
 
-	// 4. Record and report the outcome.
+	// Record and report the outcome.
 	_ = a.queue.SetState(job.ID, state)
 	a.sendStatus(job.ID, state)
 }

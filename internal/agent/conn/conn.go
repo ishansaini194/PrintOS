@@ -5,6 +5,7 @@ package conn
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,7 +21,12 @@ type Conn struct {
 	url       string
 	handler   Handler
 	onConnect func() // called after each successful (re)connect
-	ws        *websocket.Conn
+
+	// mu guards ws and serializes writes. gorilla/websocket permits only one
+	// concurrent writer, and Send is called from many goroutines (heartbeat plus
+	// one per printer worker), so every write must hold mu.
+	mu sync.Mutex
+	ws *websocket.Conn
 }
 
 // New creates a Conn. url is the cloud WebSocket endpoint; handler is called
@@ -70,10 +76,14 @@ func (c *Conn) dialAndRead(stop <-chan struct{}) error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
+	c.mu.Lock()
 	c.ws = ws
+	c.mu.Unlock()
 	defer func() {
 		ws.Close()
+		c.mu.Lock()
 		c.ws = nil
+		c.mu.Unlock()
 	}()
 
 	// Unblock the blocking ReadMessage below when stop fires: closing the socket
@@ -115,13 +125,17 @@ func (c *Conn) dialAndRead(stop <-chan struct{}) error {
 }
 
 // Send marshals and sends an envelope to the cloud (heartbeat, status, ack).
+// Safe to call from multiple goroutines: mu serializes the single permitted
+// websocket writer.
 func (c *Conn) Send(env protocol.Envelope) error {
-	if c.ws == nil {
-		return fmt.Errorf("not connected")
-	}
 	data, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ws == nil {
+		return fmt.Errorf("not connected")
 	}
 	return c.ws.WriteMessage(websocket.TextMessage, data)
 }

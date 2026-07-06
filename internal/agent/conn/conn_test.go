@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,13 +143,13 @@ func TestStopUnblocksBlockingRead(t *testing.T) {
 }
 
 func TestReconnectsAfterDrop(t *testing.T) {
-	var conns int
+	var conns atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		conns++
+		conns.Add(1)
 		ws.Close() // drop immediately to force reconnect
 	}))
 	defer srv.Close()
@@ -161,7 +162,7 @@ func TestReconnectsAfterDrop(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	close(stop)
 
-	if conns < 2 {
-		t.Errorf("expected at least 2 connection attempts, got %d", conns)
+	if n := conns.Load(); n < 2 {
+		t.Errorf("expected at least 2 connection attempts, got %d", n)
 	}
 }

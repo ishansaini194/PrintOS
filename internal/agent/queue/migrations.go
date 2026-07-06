@@ -17,6 +17,9 @@ var migrations = []string{
 		created_at      TIMESTAMP NOT NULL,
 		updated_at      TIMESTAMP NOT NULL
 	)`,
+	// 2: type column so workers can claim jobs by printer type (mono/color)
+	// without deserializing the payload blob. Existing rows default to mono.
+	`ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'mono'`,
 }
 
 // migrate brings the database up to the latest schema version, applying only

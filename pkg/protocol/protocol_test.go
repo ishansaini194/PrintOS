@@ -7,7 +7,7 @@ import (
 )
 
 func TestJobStateValidity(t *testing.T) {
-	valid := []JobState{StatePrinting, StateDone, StateFailed, StateUncertain}
+	valid := []JobState{StateQueued, StatePrinting, StateDone, StateFailed, StateUncertain}
 	for _, s := range valid {
 		if string(s) == "" {
 			t.Errorf("state %q empty", s)
@@ -36,6 +36,7 @@ func TestColorModes(t *testing.T) {
 func TestJobRoundTrip(t *testing.T) {
 	j := Job{
 		ID:             "j1",
+		Type:           "color",
 		ShopID:         "s1",
 		IdempotencyKey: "k1",
 		Mode:           ModePrintNow,
@@ -54,8 +55,41 @@ func TestJobRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != j.ID || got.Settings.Copies != 2 || got.Mode != ModePrintNow {
+	if got.ID != j.ID || got.Type != "color" || got.Settings.Copies != 2 || got.Mode != ModePrintNow {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestJobPrinterTypeDefault(t *testing.T) {
+	// Explicit type is preserved.
+	if got := (Job{Type: "color"}).PrinterType(); got != "color" {
+		t.Errorf("explicit type: got %q, want color", got)
+	}
+	// Empty/unset type defaults to mono for backward-compat.
+	if got := (Job{}).PrinterType(); got != "mono" {
+		t.Errorf("empty type: got %q, want mono", got)
+	}
+	if DefaultJobType != "mono" {
+		t.Errorf("DefaultJobType: got %q, want mono", DefaultJobType)
+	}
+}
+
+func TestJobTypeOmittedWhenEmpty(t *testing.T) {
+	// A job with no Type must still round-trip (old clouds send no type field),
+	// and unmarshal back to an empty Type that PrinterType() resolves to mono.
+	b, err := json.Marshal(Job{ID: "j1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Job
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "" {
+		t.Errorf("expected empty Type, got %q", got.Type)
+	}
+	if got.PrinterType() != "mono" {
+		t.Errorf("expected mono default, got %q", got.PrinterType())
 	}
 }
 

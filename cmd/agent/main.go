@@ -45,7 +45,6 @@ func main() {
 		UpdateURL:    env("PRINTOS_UPDATE_URL", "http://localhost:8080/agent/latest"),
 		ShopID:       shopID,
 		Token:        token,
-		PrinterName:  env("PRINTOS_PRINTER", ""),
 		Version:      protocol.Version,
 		HeartbeatInt: 45 * time.Second,
 		UpdateInt:    6 * time.Hour,
@@ -60,7 +59,7 @@ func main() {
 
 	// Build the printer and the agent.
 	p := printer.New(env("PRINTOS_SUMATRA", "SumatraPDF.exe"))
-	a := agent.New(cfg, q, p)
+	a := agent.New(cfg, q, p, printerList)
 
 	// Stop cleanly on Ctrl+C / termination.
 	stop := make(chan struct{})
