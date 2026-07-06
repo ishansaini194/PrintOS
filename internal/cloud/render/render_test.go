@@ -6,17 +6,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // writeSamplePDF writes a minimal but valid 1-page PDF (correct xref offsets).
 func writeSamplePDF(t *testing.T, path string) {
 	t.Helper()
-	objs := []string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+	writeSamplePDFPages(t, path, 1)
+}
+
+// writeSamplePDFPages writes a minimal but valid n-page PDF.
+func writeSamplePDFPages(t *testing.T, path string, n int) {
+	t.Helper()
+	kids := make([]string, n)
+	pages := make([]string, n)
+	for i := 0; i < n; i++ {
+		kids[i] = fmt.Sprintf("%d 0 R", 3+i)
+		pages[i] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
 	}
+	objs := append([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), n),
+	}, pages...)
 	var b bytes.Buffer
 	b.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objs))
@@ -62,6 +74,37 @@ func TestNormalizePDF(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Fatalf("output still present after cleanup: %v", err)
+	}
+}
+
+func TestPageCount(t *testing.T) {
+	if _, err := exec.LookPath("pdfinfo"); err != nil {
+		t.Skip("pdfinfo not installed; skipping")
+	}
+	dir := t.TempDir()
+	for _, n := range []int{1, 3} {
+		path := filepath.Join(dir, fmt.Sprintf("sample%d.pdf", n))
+		writeSamplePDFPages(t, path, n)
+		got, err := PageCount(path)
+		if err != nil {
+			t.Fatalf("PageCount(%d pages): %v", n, err)
+		}
+		if got != n {
+			t.Errorf("PageCount = %d, want %d", got, n)
+		}
+	}
+}
+
+func TestPageCountNotAPDF(t *testing.T) {
+	if _, err := exec.LookPath("pdfinfo"); err != nil {
+		t.Skip("pdfinfo not installed; skipping")
+	}
+	path := filepath.Join(t.TempDir(), "junk.pdf")
+	if err := os.WriteFile(path, []byte("not a pdf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PageCount(path); err == nil {
+		t.Error("expected error for non-PDF input")
 	}
 }
 

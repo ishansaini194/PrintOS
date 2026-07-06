@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,11 +15,27 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/ishansaini194/PrintOS/internal/cloud/render"
+	"github.com/ishansaini194/PrintOS/internal/cloud/store"
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
 
 // jobTTL is how long a created job stays valid before expiring.
 const jobTTL = 2 * time.Hour
+
+// Placeholder per-page rates in paise (₹2 mono, ₹10 color). Business will tune
+// these later — keep every rate in this one block.
+const (
+	rateMonoPaise  = 200
+	rateColorPaise = 1000
+)
+
+// ratePaise returns the per-page rate for a job type.
+func ratePaise(jobType string) int {
+	if jobType == string(protocol.ColorColor) {
+		return rateColorPaise
+	}
+	return rateMonoPaise
+}
 
 // PDFPath returns the on-disk path for a job's stored PDF.
 func PDFPath(jobID string) string {
@@ -35,7 +51,9 @@ func pdfDir() string {
 }
 
 // Upload accepts a customer's file for a shop, normalizes it to a clean PDF,
-// stores it, creates a job, and pushes the job to the shop's agent.
+// stores it, and creates a job awaiting payment. It returns the price and the
+// claim code — NOTHING is sent to the agent until payment is confirmed
+// (POST /pay/confirm).
 func (h *Handlers) Upload(c *fiber.Ctx) error {
 	shopID := c.FormValue("shop_id")
 	if shopID == "" {
@@ -54,6 +72,8 @@ func (h *Handlers) Upload(c *fiber.Ctx) error {
 	if err != nil || !active {
 		return badRequest(c, "unknown or inactive shop")
 	}
+
+	settings := parseSettings(c)
 
 	// Save the upload to a temp file, preserving its extension so render can
 	// detect the type.
@@ -81,9 +101,35 @@ func (h *Handlers) Upload(c *fiber.Ctx) error {
 	}
 	defer cleanup()
 
-	// Create the job row (state 'created'), then persist the PDF as <job_id>.pdf.
+	// Price from the normalized PDF: pages × copies × per-page rate.
+	pages, err := render.PageCount(cleanPDF)
+	if err != nil {
+		return serverError(c, "could not count pages")
+	}
+	jobType := string(settings.Color)
+	amountPaise := pages * settings.Copies * ratePaise(jobType)
+
+	// The claim code must be unambiguous among the shop's active jobs.
+	claimCode, err := h.uniqueClaimCode(shopID)
+	if err != nil {
+		return serverError(c, "could not allocate claim code")
+	}
+
+	// Create the job row (awaiting payment), then persist the PDF as
+	// <job_id>.pdf and record its checksum for the eventual agent push.
 	expires := time.Now().Add(jobTTL).UTC()
-	job, err := h.jobs.Create(shopID, genIdempotencyKey(), genClaimCode(), expires)
+	job, err := h.jobs.Create(store.NewJob{
+		ShopID:         shopID,
+		IdempotencyKey: genIdempotencyKey(),
+		ClaimCode:      claimCode,
+		Type:           jobType,
+		Copies:         settings.Copies,
+		Pages:          pages,
+		AmountPaise:    amountPaise,
+		Duplex:         settings.Duplex,
+		PaperSize:      settings.PaperSize,
+		ExpiresAt:      expires,
+	})
 	if err != nil {
 		return serverError(c, "could not create job")
 	}
@@ -92,43 +138,24 @@ func (h *Handlers) Upload(c *fiber.Ctx) error {
 	if err != nil {
 		return serverError(c, "could not store pdf")
 	}
-
-	// Build and push the job to the shop's agent.
-	pj := protocol.Job{
-		ID:             job.ID,
-		ShopID:         shopID,
-		IdempotencyKey: job.IdempotencyKey,
-		Mode:           protocol.ModePrintNow,
-		ClaimCode:      job.ClaimCode,
-		PDFURL:         publicURL() + "/jobs/" + job.ID + "/pdf",
-		PDFSHA256:      sha,
-		Settings:       parseSettings(c),
-		CreatedAt:      job.CreatedAt.UTC(),
-		ExpiresAt:      expires,
+	if err := h.jobs.SetSHA(job.ID, sha); err != nil {
+		return serverError(c, "could not record pdf checksum")
 	}
-	payload, _ := json.Marshal(protocol.JobPushMsg{Job: pj})
-	pushErr := PushToAgent(shopID, protocol.Envelope{
-		Type:            protocol.MsgJobPush,
-		ProtocolVersion: protocol.Version,
-		SentAt:          time.Now().UTC(),
-		Payload:         payload,
+
+	return c.JSON(fiber.Map{
+		"job_id":       job.ID,
+		"amount_paise": amountPaise, // pages × copies × rate, in paise
+		"claim_code":   job.ClaimCode,
 	})
-	if pushErr != nil {
-		// Shop offline: keep the job row; the agent can be re-sent later.
-		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-			"job_id":     job.ID,
-			"claim_code": job.ClaimCode,
-			"note":       "shop offline, will retry",
-		})
-	}
-
-	return c.JSON(fiber.Map{"job_id": job.ID, "claim_code": job.ClaimCode})
 }
 
 // parseSettings reads print options from the multipart form, with defaults.
+// The printer type comes from "type" ("mono"/"color"); the older "color" field
+// is still honored for compatibility.
 func parseSettings(c *fiber.Ctx) protocol.PrintSettings {
 	color := protocol.ColorMono
-	if c.FormValue("color") == string(protocol.ColorColor) {
+	if c.FormValue("type") == string(protocol.ColorColor) ||
+		c.FormValue("color") == string(protocol.ColorColor) {
 		color = protocol.ColorColor
 	}
 	copies, err := strconv.Atoi(c.FormValue("copies"))
@@ -145,6 +172,22 @@ func parseSettings(c *fiber.Ctx) protocol.PrintSettings {
 		Duplex:    c.FormValue("duplex") == "true",
 		PaperSize: paper,
 	}
+}
+
+// uniqueClaimCode generates a 6-digit code no active job of the shop is using,
+// regenerating on collision.
+func (h *Handlers) uniqueClaimCode(shopID string) (string, error) {
+	for range 20 {
+		code := genClaimCode()
+		active, err := h.jobs.ClaimCodeActive(shopID, code)
+		if err != nil {
+			return "", err
+		}
+		if !active {
+			return code, nil
+		}
+	}
+	return "", fmt.Errorf("could not find a free claim code for shop %s", shopID)
 }
 
 // storePDF copies src to dest (creating the dir) and returns the sha256 of the
@@ -175,12 +218,13 @@ func storePDF(src, dest string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// genClaimCode returns a short human-readable claim code (6 chars).
+// genClaimCode returns a random 6-digit numeric claim code — the code the
+// customer pays with and later types at the shop to release the print.
 func genClaimCode() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	for i := range b {
-		b[i] = setupCodeAlphabet[int(b[i])%len(setupCodeAlphabet)]
+		b[i] = '0' + b[i]%10
 	}
 	return string(b)
 }

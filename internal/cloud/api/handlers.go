@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -22,11 +21,16 @@ type Shops interface {
 	IsActive(shopID string) (bool, error)
 }
 
-// Jobs is the subset of job-store operations the upload handler and status
-// updates need.
+// Jobs is the subset of job-store operations the upload, payment, release and
+// status handlers need.
 type Jobs interface {
-	Create(shopID, idempotencyKey, claimCode string, expires time.Time) (store.Job, error)
+	Create(p store.NewJob) (store.Job, error)
+	Get(id string) (store.Job, error)
 	SetState(id, state string) error
+	SetSHA(id, sha string) error
+	MarkHeld(id string) error
+	FindReleasable(shopID, claimCode string) (store.Job, error)
+	ClaimCodeActive(shopID, claimCode string) (bool, error)
 }
 
 // Handlers bundles the DB-backed HTTP/WebSocket handlers.

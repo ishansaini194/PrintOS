@@ -7,6 +7,7 @@
 //   - gs       (Ghostscript)  — PDF optimize
 //   - soffice  (LibreOffice)  — Office/text/image → PDF
 //   - heif-convert or convert (ImageMagick) — HEIC → JPG/PNG
+//   - pdfinfo  (Poppler)      — page count (for pricing)
 package render
 
 import (
@@ -227,6 +228,31 @@ func optimizePDF(in, outDir string) (string, error) {
 		return "", fmt.Errorf("%w: ghostscript produced no output", ErrConvertFailed)
 	}
 	return out, nil
+}
+
+// PageCount returns the number of pages in the PDF at path, via pdfinfo
+// (Poppler). It runs on Normalize's output, so the count priced is the count
+// that will actually print.
+func PageCount(path string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), convertTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "pdfinfo", path).Output()
+	if err != nil {
+		return 0, fmt.Errorf("%w: pdfinfo: %v", ErrConvertFailed, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		rest, ok := strings.CutPrefix(line, "Pages:")
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(rest))
+		if err != nil || n < 1 {
+			return 0, fmt.Errorf("%w: pdfinfo: bad page count %q", ErrConvertFailed, rest)
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("%w: pdfinfo: no Pages line", ErrConvertFailed)
 }
 
 // runTool executes an external tool with a timeout, mapping any failure to
