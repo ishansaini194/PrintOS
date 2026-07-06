@@ -46,10 +46,12 @@ func (q *Queue) Close() error {
 	return q.db.Close()
 }
 
-// Enqueue writes a job to disk in the "queued" state BEFORE any print attempt,
-// so a crash never loses a paid job. A worker later claims it via GetNext. If
-// the idempotency key was already seen, it returns ErrDuplicate and does not
-// insert — the caller must NOT print again.
+// Enqueue writes a job to disk BEFORE any print attempt, so a crash never loses
+// a paid job. Release-mode jobs (v1 default) land as "held" — they wait, invisible
+// to workers, until Release moves them to "queued". Explicit print_now jobs land
+// directly as "queued" for a worker to claim via GetNext. If the idempotency key
+// was already seen, it returns ErrDuplicate and does not insert — the caller must
+// NOT print again.
 //
 // The job's type is normalized (empty → mono) at this persist boundary and
 // stored in its own column so GetNext can filter on it without deserializing.
@@ -58,17 +60,40 @@ func (q *Queue) Enqueue(job protocol.Job) error {
 	if err != nil {
 		return fmt.Errorf("marshal job: %w", err)
 	}
+	state := protocol.StateQueued
+	if job.PrintMode() == protocol.ModeRelease {
+		state = protocol.StateHeld
+	}
 	now := time.Now().UTC()
 	_, err = q.db.Exec(
 		`INSERT INTO jobs (id, idempotency_key, state, type, payload, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, job.IdempotencyKey, string(protocol.StateQueued), job.PrinterType(), string(payload), now, now,
+		job.ID, job.IdempotencyKey, string(state), job.PrinterType(), string(payload), now, now,
 	)
 	if err != nil {
 		// UNIQUE constraint on idempotency_key → duplicate.
 		return ErrDuplicate
 	}
 	return nil
+}
+
+// Release moves a held job to "queued" so the normal per-printer worker picks it
+// up. It returns true if a held job was released, false if no held job with that
+// id exists (already released, already printed, or unknown) — releasing twice is
+// harmless.
+func (q *Queue) Release(jobID string) (bool, error) {
+	res, err := q.db.Exec(
+		`UPDATE jobs SET state = ?, updated_at = ? WHERE id = ? AND state = ?`,
+		string(protocol.StateQueued), time.Now().UTC(), jobID, string(protocol.StateHeld),
+	)
+	if err != nil {
+		return false, fmt.Errorf("release job %s: %w", jobID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetNext atomically claims the oldest queued job of the given type, moving it
@@ -121,13 +146,15 @@ func (q *Queue) SetState(id string, state protocol.JobState) error {
 	return nil
 }
 
-// Pending returns jobs not yet in a terminal state — either "queued" (waiting
-// for a worker) or "printing" (claimed, in progress). Used for the heartbeat's
-// queue depth and, on restart, to resume or mark uncertain after a crash.
+// Pending returns jobs not yet in a terminal state — "held" (awaiting release),
+// "queued" (waiting for a worker) or "printing" (claimed, in progress). Used for
+// the heartbeat's queue depth and, on restart, to resume or mark uncertain after
+// a crash. Held jobs survive restarts here but never auto-print: only GetNext
+// hands jobs to workers, and it selects "queued" alone.
 func (q *Queue) Pending() ([]protocol.Job, error) {
 	rows, err := q.db.Query(
-		`SELECT payload FROM jobs WHERE state IN (?, ?)`,
-		string(protocol.StateQueued), string(protocol.StatePrinting),
+		`SELECT payload FROM jobs WHERE state IN (?, ?, ?)`,
+		string(protocol.StateHeld), string(protocol.StateQueued), string(protocol.StatePrinting),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query pending: %w", err)

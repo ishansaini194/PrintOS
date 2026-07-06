@@ -5,6 +5,7 @@ import "time"
 type JobState string
 
 const (
+	StateHeld      JobState = "held"   // persisted, paid, waiting for the claim code
 	StateQueued    JobState = "queued" // persisted, waiting for a worker to claim
 	StatePrinting  JobState = "printing"
 	StateDone      JobState = "done"
@@ -60,4 +61,14 @@ func (j Job) PrinterType() string {
 		return DefaultJobType
 	}
 	return j.Type
+}
+
+// PrintMode returns the job's mode, defaulting an empty/unset Mode to release —
+// v1 is hold-for-release, so a job never prints before its claim code is typed
+// unless the cloud explicitly asks for print_now.
+func (j Job) PrintMode() JobMode {
+	if j.Mode == "" {
+		return ModeRelease
+	}
+	return j.Mode
 }

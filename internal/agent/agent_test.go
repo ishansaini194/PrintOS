@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,10 +42,27 @@ func sleepingSumatra(t *testing.T, logPath string, sleep time.Duration) string {
 	return path
 }
 
-// TestWorkersPrintConcurrently pushes one mono and one color job and runs one
-// worker per printer. It verifies both prints overlap in time (true parallel
-// printing, not sequential) and that cancelling the context stops every worker.
-func TestWorkersPrintConcurrently(t *testing.T) {
+// releaseEnvelope builds the cloud→agent release message for a job.
+func releaseEnvelope(t *testing.T, jobID string) protocol.Envelope {
+	t.Helper()
+	payload, err := json.Marshal(protocol.ReleaseMsg{JobID: jobID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.Envelope{
+		Type:            protocol.MsgRelease,
+		ProtocolVersion: protocol.Version,
+		SentAt:          time.Now().UTC(),
+		Payload:         payload,
+	}
+}
+
+// TestHoldThenReleasePrintsConcurrently drives the v1 flow end-to-end on the
+// agent: two release-mode jobs (one mono, one color) arrive and are HELD — the
+// running workers must not print them. After the release messages arrive, both
+// jobs print concurrently on their own printers (overlapping timestamps), and
+// cancelling the context stops every worker.
+func TestHoldThenReleasePrintsConcurrently(t *testing.T) {
 	// A tiny HTTP server standing in for the cloud's PDF host.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("%PDF-1.4 fake\n"))
@@ -66,15 +84,12 @@ func TestWorkersPrintConcurrently(t *testing.T) {
 	}
 	a := New(Config{}, q, p, printers)
 
-	// Empty PDFSHA256 skips checksum verification for the fake bytes.
-	mono := protocol.Job{ID: "mono1", Type: "mono", IdempotencyKey: "km", PDFURL: srv.URL}
+	// Release-mode jobs (v1 default: Mode unset → release). Empty PDFSHA256
+	// skips checksum verification for the fake bytes.
+	mono := protocol.Job{ID: "mono1", Mode: protocol.ModeRelease, Type: "mono", IdempotencyKey: "km", PDFURL: srv.URL}
 	color := protocol.Job{ID: "color1", Type: "color", IdempotencyKey: "kc", PDFURL: srv.URL}
-	if err := q.Enqueue(mono); err != nil {
-		t.Fatalf("enqueue mono: %v", err)
-	}
-	if err := q.Enqueue(color); err != nil {
-		t.Fatalf("enqueue color: %v", err)
-	}
+	a.persistJob(mono)
+	a.persistJob(color)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -84,6 +99,22 @@ func TestWorkersPrintConcurrently(t *testing.T) {
 			defer wg.Done()
 			a.worker(ctx, pr)
 		}(pr)
+	}
+
+	// Workers are running but both jobs are HELD — nothing may print. Give the
+	// workers a few poll cycles to (wrongly) pick something up, then check.
+	time.Sleep(3 * workerPoll)
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("held job printed before release: %s", data)
+	}
+
+	// Release both (as if their claim codes were typed at the shop).
+	if err := a.handle(releaseEnvelope(t, "mono1")); err != nil {
+		t.Fatalf("release mono1: %v", err)
+	}
+	if err := a.handle(releaseEnvelope(t, "color1")); err != nil {
+		t.Fatalf("release color1: %v", err)
 	}
 
 	// Wait until both jobs leave the queue (printed).

@@ -7,7 +7,7 @@ import (
 )
 
 func TestJobStateValidity(t *testing.T) {
-	valid := []JobState{StateQueued, StatePrinting, StateDone, StateFailed, StateUncertain}
+	valid := []JobState{StateHeld, StateQueued, StatePrinting, StateDone, StateFailed, StateUncertain}
 	for _, s := range valid {
 		if string(s) == "" {
 			t.Errorf("state %q empty", s)
@@ -57,6 +57,60 @@ func TestJobRoundTrip(t *testing.T) {
 	}
 	if got.ID != j.ID || got.Type != "color" || got.Settings.Copies != 2 || got.Mode != ModePrintNow {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestJobPrintModeDefault(t *testing.T) {
+	// Explicit modes are preserved.
+	if got := (Job{Mode: ModePrintNow}).PrintMode(); got != ModePrintNow {
+		t.Errorf("explicit print_now: got %q", got)
+	}
+	if got := (Job{Mode: ModeRelease}).PrintMode(); got != ModeRelease {
+		t.Errorf("explicit release: got %q", got)
+	}
+	// Empty/unset mode defaults to release — v1 is hold-for-release.
+	if got := (Job{}).PrintMode(); got != ModeRelease {
+		t.Errorf("empty mode: got %q, want release", got)
+	}
+}
+
+func TestReleaseMsgRoundTrip(t *testing.T) {
+	payload, err := json.Marshal(ReleaseMsg{JobID: "j1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{Type: MsgRelease, ProtocolVersion: Version, SentAt: time.Now().UTC(), Payload: payload}
+	b, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotEnv Envelope
+	if err := json.Unmarshal(b, &gotEnv); err != nil {
+		t.Fatal(err)
+	}
+	if gotEnv.Type != MsgRelease {
+		t.Errorf("type = %q, want release", gotEnv.Type)
+	}
+	var got ReleaseMsg
+	if err := json.Unmarshal(gotEnv.Payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.JobID != "j1" {
+		t.Errorf("job_id = %q, want j1", got.JobID)
+	}
+}
+
+func TestJobModeRoundTrip(t *testing.T) {
+	b, err := json.Marshal(Job{ID: "j1", Mode: ModeRelease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Job
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != ModeRelease {
+		t.Errorf("mode = %q, want release", got.Mode)
 	}
 }
 

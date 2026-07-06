@@ -5,12 +5,13 @@ import (
 	"time"
 )
 
-// MessageType tags every message on the wire. v1 has NO release message.
+// MessageType tags every message on the wire.
 type MessageType string
 
 const (
 	// Cloud → Agent
 	MsgJobPush   MessageType = "job_push"
+	MsgRelease   MessageType = "release" // print a held job (claim code was typed)
 	MsgResolve   MessageType = "resolve"
 	MsgUpdateNow MessageType = "update_now"
 
@@ -37,6 +38,12 @@ type Envelope struct {
 
 type JobPushMsg struct {
 	Job Job `json:"job"`
+}
+
+// ReleaseMsg tells the agent to print a held job — sent when someone types the
+// job's claim code on the shop's release page.
+type ReleaseMsg struct {
+	JobID string `json:"job_id"`
 }
 
 type ResolveMsg struct {

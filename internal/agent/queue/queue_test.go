@@ -20,6 +20,7 @@ func newTestQueue(t *testing.T) *Queue {
 	return q
 }
 
+// sampleJob is an explicit print_now job — it lands directly in "queued".
 func sampleJob(id, key string) protocol.Job {
 	return protocol.Job{
 		ID:             id,
@@ -32,6 +33,13 @@ func sampleJob(id, key string) protocol.Job {
 func typedJob(id, key, typ string) protocol.Job {
 	j := sampleJob(id, key)
 	j.Type = typ
+	return j
+}
+
+// heldJob is a release-mode job — it lands as "held" until Release is called.
+func heldJob(id, key, typ string) protocol.Job {
+	j := typedJob(id, key, typ)
+	j.Mode = protocol.ModeRelease
 	return j
 }
 
@@ -139,6 +147,94 @@ func TestGetNextFIFO(t *testing.T) {
 		if err != nil || got == nil || got.ID != want {
 			t.Fatalf("GetNext: got %+v err %v, want %s", got, err, want)
 		}
+	}
+}
+
+func TestHeldJobNotReturnedByGetNext(t *testing.T) {
+	q := newTestQueue(t)
+	ctx := context.Background()
+	if err := q.Enqueue(heldJob("h1", "kh", "mono")); err != nil {
+		t.Fatalf("enqueue held: %v", err)
+	}
+	// Held jobs are invisible to workers — they must never auto-print.
+	if got, err := q.GetNext(ctx, "mono"); err != nil || got != nil {
+		t.Fatalf("GetNext on held job: got %+v err %v, want nil", got, err)
+	}
+	// But they count as pending (they exist, persisted, awaiting release).
+	pending, err := q.Pending()
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending: got %d err %v, want 1", len(pending), err)
+	}
+}
+
+func TestEmptyModeDefaultsToHeld(t *testing.T) {
+	q := newTestQueue(t)
+	ctx := context.Background()
+	// No mode set at all (old cloud) → v1 default is release → held, not printed.
+	j := protocol.Job{ID: "j1", IdempotencyKey: "k1", Type: "mono"}
+	if err := q.Enqueue(j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if got, err := q.GetNext(ctx, "mono"); err != nil || got != nil {
+		t.Fatalf("GetNext: got %+v err %v, want nil (job must be held)", got, err)
+	}
+}
+
+func TestReleaseMovesHeldToQueued(t *testing.T) {
+	q := newTestQueue(t)
+	ctx := context.Background()
+	if err := q.Enqueue(heldJob("h1", "kh", "color")); err != nil {
+		t.Fatalf("enqueue held: %v", err)
+	}
+
+	ok, err := q.Release("h1")
+	if err != nil || !ok {
+		t.Fatalf("Release: ok=%v err=%v, want released", ok, err)
+	}
+
+	// Now the normal worker path finds it.
+	got, err := q.GetNext(ctx, "color")
+	if err != nil || got == nil || got.ID != "h1" {
+		t.Fatalf("GetNext after release: got %+v err %v, want h1", got, err)
+	}
+
+	// Releasing again (or an unknown id) is a harmless no-op.
+	if ok, err := q.Release("h1"); err != nil || ok {
+		t.Errorf("double release: ok=%v err=%v, want false", ok, err)
+	}
+	if ok, err := q.Release("nope"); err != nil || ok {
+		t.Errorf("unknown release: ok=%v err=%v, want false", ok, err)
+	}
+}
+
+func TestHeldJobSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "held.db")
+	q1, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := q1.Enqueue(heldJob("h1", "kh", "mono")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	q1.Close()
+
+	// Restart: the held job is still there and still does NOT auto-print.
+	q2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer q2.Close()
+	ctx := context.Background()
+	if got, err := q2.GetNext(ctx, "mono"); err != nil || got != nil {
+		t.Fatalf("GetNext after reopen: got %+v err %v, want nil (still held)", got, err)
+	}
+	// Until released — then it prints.
+	if ok, err := q2.Release("h1"); err != nil || !ok {
+		t.Fatalf("release after reopen: ok=%v err=%v", ok, err)
+	}
+	got, err := q2.GetNext(ctx, "mono")
+	if err != nil || got == nil || got.ID != "h1" {
+		t.Fatalf("GetNext after release: got %+v err %v, want h1", got, err)
 	}
 }
 

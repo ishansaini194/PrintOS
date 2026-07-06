@@ -134,19 +134,44 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 
 // handle dispatches an incoming envelope from the cloud.
 func (a *Agent) handle(env protocol.Envelope) error {
-	if env.Type == protocol.MsgJobPush {
+	switch env.Type {
+	case protocol.MsgJobPush:
 		var msg protocol.JobPushMsg
 		if err := json.Unmarshal(env.Payload, &msg); err != nil {
 			return err
 		}
 		a.persistJob(msg.Job)
+	case protocol.MsgRelease:
+		var msg protocol.ReleaseMsg
+		if err := json.Unmarshal(env.Payload, &msg); err != nil {
+			return err
+		}
+		a.releaseJob(msg.JobID)
 	}
 	return nil
 }
 
+// releaseJob flips a held job to queued; the normal per-printer worker then
+// picks it up and the existing download→verify→print path runs unchanged.
+func (a *Agent) releaseJob(jobID string) {
+	ok, err := a.queue.Release(jobID)
+	if err != nil {
+		log.Printf("release job %s: %v", jobID, err)
+		return
+	}
+	if !ok {
+		// Unknown id, or already released/printed — harmless, just note it.
+		log.Printf("release job %s: no held job with that id", jobID)
+		return
+	}
+	log.Printf("released job %s to print queue", jobID)
+}
+
 // persistJob writes a pushed job to the queue and acks it. It does NOT print —
-// a per-printer worker later claims the job via GetNext and prints it. This
-// preserves write-before-print: the durable record exists before any print.
+// release-mode jobs (v1 default) are held until a release message arrives;
+// print_now jobs go straight to queued. Either way a per-printer worker later
+// claims the job via GetNext and prints it. This preserves write-before-print:
+// the durable record exists before any print.
 func (a *Agent) persistJob(job protocol.Job) {
 	err := a.queue.Enqueue(job)
 	switch {
