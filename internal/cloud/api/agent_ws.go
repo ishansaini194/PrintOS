@@ -99,6 +99,11 @@ func (h *Handlers) handleEnvelope(shopID string, env protocol.Envelope) {
 		var m protocol.JobAckMsg
 		if json.Unmarshal(env.Payload, &m) == nil {
 			log.Printf("[%s] ack: job=%s duplicate=%v", shopID, m.JobID, m.Duplicate)
+			// The agent has the job persisted and is holding it. MarkHeld only
+			// moves paid → held, so a late ack never regresses a printing/done job.
+			if err := h.jobs.MarkHeld(m.JobID); err != nil {
+				log.Printf("[%s] mark held: %v", shopID, err)
+			}
 		}
 	case protocol.MsgStatus:
 		var m protocol.StatusMsg

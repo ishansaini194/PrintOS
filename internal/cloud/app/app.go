@@ -55,8 +55,19 @@ func registerRoutes(srv *server.Server, h *api.Handlers) {
 	// Agent provisioning: exchange a setup code for a long-lived token.
 	app.Post("/agent/provision", h.Provision)
 
-	// Customer upload: file → clean PDF → job → push to the shop's agent.
+	// Customer upload: file → clean PDF → job awaiting payment. Returns the
+	// price and claim code; nothing reaches the agent until payment.
 	app.Post("/upload", h.Upload)
+
+	// Payment confirmation (STUB — real gateway later): marks the job paid and
+	// pushes it to the shop's agent, which holds it.
+	app.Post("/pay/confirm", h.PayConfirm)
+
+	// Release: the claim code typed at the shop prints the held job.
+	app.Post("/release", h.Release)
+
+	// The shop PC keeps this page open to type claim codes into.
+	app.Get("/shop/:shop_id/release", h.ReleasePage)
 
 	// Agent pull-connection: only allow WebSocket upgrades here.
 	app.Use("/agent", func(c *fiber.Ctx) error {
