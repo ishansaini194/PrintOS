@@ -19,8 +19,6 @@ const (
 	JobExpired         = "expired"          // hold window elapsed; refunded and terminal
 )
 
-const RefundReasonHoldExpired = "hold_expired"
-
 // Job mirrors a row in the jobs table. state carries the cloud-side lifecycle
 // above, then the agent-reported protocol states (printing/done/failed/uncertain).
 type Job struct {
@@ -101,8 +99,10 @@ func (s *JobStore) SetState(id, state string) error {
 	).Error
 }
 
-// MarkPaid records stub payment success and starts the hold expiry window.
-func (s *JobStore) MarkPaid(id string, expiresAt time.Time) (Job, error) {
+// MarkPaid records a verified payment: job awaiting_payment → paid, payment
+// row (created at order time) → 'paid' with Razorpay's payment id, and the
+// hold expiry window starts.
+func (s *JobStore) MarkPaid(id, razorpayPaymentID string, expiresAt time.Time) (Job, error) {
 	var job Job
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Exec(
@@ -117,10 +117,10 @@ func (s *JobStore) MarkPaid(id string, expiresAt time.Time) (Job, error) {
 			return ErrNotFound
 		}
 		if err := tx.Exec(
-			`INSERT INTO payments (job_id, amount_paise, status, paid_at)
-			 SELECT id, amount_paise, 'paid', now() FROM jobs WHERE id = ?
-			 ON CONFLICT (job_id) DO NOTHING`,
-			id,
+			`UPDATE payments SET status = ?, razorpay_payment_id = ?,
+			        paid_at = now(), updated_at = now()
+			 WHERE job_id = ? AND status = ?`,
+			PaymentPaid, razorpayPaymentID, id, PaymentCreated,
 		).Error; err != nil {
 			return err
 		}
@@ -191,91 +191,20 @@ type ExpiredJob struct {
 	ShopID string
 }
 
-type expiringJob struct {
-	ID          string
-	ShopID      string
-	AmountPaise int
-}
-
-type paymentRow struct {
-	ID          string
-	AmountPaise int
-	Status      string
-}
-
-// ExpireDue terminally expires paid/held jobs past their hold window and records
-// the stub refund in the same transaction. Only rows moved by this call are
-// returned, so re-running the sweeper is idempotent and sends no duplicate
-// cancels or refunds.
+// ExpireDue terminally expires paid/held jobs past their hold window. Only
+// rows moved by this call are returned, so re-running the sweeper sends no
+// duplicate cancels. Refunds are NOT issued here — the gateway call is a
+// network round-trip that must not sit inside this transaction; the refund
+// sweep picks these jobs up via RefundablePayments.
 func (s *JobStore) ExpireDue(now time.Time) ([]ExpiredJob, error) {
 	var out []ExpiredJob
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		var jobs []expiringJob
-		if err := tx.Raw(
-			`SELECT id, shop_id, amount_paise FROM jobs
+		return tx.Raw(
+			`UPDATE jobs SET state = ?, updated_at = now()
 			 WHERE state IN (?, ?) AND expires_at < ?
-			 ORDER BY expires_at, id
-			 FOR UPDATE`,
-			JobPaid, JobHeld, now,
-		).Scan(&jobs).Error; err != nil {
-			return err
-		}
-
-		for _, job := range jobs {
-			res := tx.Exec(
-				`UPDATE jobs SET state = ?, updated_at = now()
-				 WHERE id = ? AND state IN (?, ?)`,
-				JobExpired, job.ID, JobPaid, JobHeld,
-			)
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected == 0 {
-				continue
-			}
-
-			if err := tx.Exec(
-				`INSERT INTO payments (job_id, amount_paise, status, paid_at)
-				 VALUES (?, ?, 'paid', now())
-				 ON CONFLICT (job_id) DO NOTHING`,
-				job.ID, job.AmountPaise,
-			).Error; err != nil {
-				return err
-			}
-
-			var payment paymentRow
-			if err := tx.Raw(
-				`SELECT id, amount_paise, status FROM payments
-				 WHERE job_id = ?
-				 FOR UPDATE`,
-				job.ID,
-			).Scan(&payment).Error; err != nil {
-				return err
-			}
-			if payment.ID == "" {
-				return ErrNotFound
-			}
-			if payment.Status != "refunded" {
-				if err := tx.Exec(
-					`UPDATE payments SET status = 'refunded', updated_at = now()
-					 WHERE id = ? AND status <> 'refunded'`,
-					payment.ID,
-				).Error; err != nil {
-					return err
-				}
-				if err := tx.Exec(
-					`INSERT INTO refunds (payment_id, reason, amount_paise)
-					 VALUES (?, ?, ?)
-					 ON CONFLICT DO NOTHING`,
-					payment.ID, RefundReasonHoldExpired, payment.AmountPaise,
-				).Error; err != nil {
-					return err
-				}
-			}
-
-			out = append(out, ExpiredJob{ID: job.ID, ShopID: job.ShopID})
-		}
-		return nil
+			 RETURNING id, shop_id`,
+			JobExpired, JobPaid, JobHeld, now,
+		).Scan(&out).Error
 	})
 	return out, err
 }

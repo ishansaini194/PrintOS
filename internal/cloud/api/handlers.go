@@ -27,24 +27,30 @@ type Shops interface {
 type Jobs interface {
 	Create(p store.NewJob) (store.Job, error)
 	Get(id string) (store.Job, error)
-	MarkPaid(id string, expiresAt time.Time) (store.Job, error)
+	MarkPaid(id, razorpayPaymentID string, expiresAt time.Time) (store.Job, error)
 	SetState(id, state string) error
 	SetSHA(id, sha string) error
 	MarkHeld(id string) error
 	FindReleasable(shopID, claimCode string) (store.Job, error)
 	ClaimCodeActive(shopID, claimCode string) (bool, error)
 	ExpireDue(now time.Time) ([]store.ExpiredJob, error)
+	PaymentByJob(jobID string) (store.Payment, error)
+	SavePaymentOrder(jobID string, amountPaise int, razorpayOrderID string) error
+	RefundablePayments() ([]store.RefundablePayment, error)
+	MarkRefunded(paymentID, reason, gatewayRefundID, status string, amountPaise int) error
 }
 
 // Handlers bundles the DB-backed HTTP/WebSocket handlers.
 type Handlers struct {
 	shops Shops
 	jobs  Jobs
+	pay   Gateway
 }
 
-// NewHandlers builds the handler set over the shop and job stores.
-func NewHandlers(shops Shops, jobs Jobs) *Handlers {
-	return &Handlers{shops: shops, jobs: jobs}
+// NewHandlers builds the handler set over the shop and job stores and the
+// payment gateway.
+func NewHandlers(shops Shops, jobs Jobs, pay Gateway) *Handlers {
+	return &Handlers{shops: shops, jobs: jobs, pay: pay}
 }
 
 // CreateShop provisions a new shop and returns its one-time setup code.

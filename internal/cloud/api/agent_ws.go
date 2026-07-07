@@ -113,6 +113,15 @@ func (h *Handlers) handleEnvelope(shopID string, env protocol.Envelope) {
 			if err := h.jobs.SetState(m.JobID, string(m.State)); err != nil {
 				log.Printf("[%s] persist job state: %v", shopID, err)
 			}
+			// A paid job that failed to print gets its money back promptly;
+			// the periodic sweep is the retry backstop if this attempt fails.
+			if m.State == protocol.StateFailed {
+				go func() {
+					if err := SweepRefunds(h.jobs, h.pay); err != nil {
+						log.Printf("refund after failed job %s: %v", m.JobID, err)
+					}
+				}()
+			}
 		}
 	default:
 		log.Printf("[%s] unknown message type: %s", shopID, env.Type)

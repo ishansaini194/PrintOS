@@ -18,9 +18,10 @@ import (
 
 // fakeJobs is an in-memory Jobs for testing, mirroring the store's semantics.
 type fakeJobs struct {
-	mu      sync.Mutex
-	rows    map[string]store.Job
-	refunds map[string]int
+	mu       sync.Mutex
+	rows     map[string]store.Job
+	payments map[string]store.Payment // keyed by job id
+	refunds  map[string]int           // recorded refunds, keyed by payment id
 }
 
 func (f *fakeJobs) Create(p store.NewJob) (store.Job, error) {
@@ -70,7 +71,7 @@ func (f *fakeJobs) SetState(id, state string) error {
 	return nil
 }
 
-func (f *fakeJobs) MarkPaid(id string, expiresAt time.Time) (store.Job, error) {
+func (f *fakeJobs) MarkPaid(id, razorpayPaymentID string, expiresAt time.Time) (store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.rows[id]
@@ -80,7 +81,74 @@ func (f *fakeJobs) MarkPaid(id string, expiresAt time.Time) (store.Job, error) {
 	j.State = store.JobPaid
 	j.ExpiresAt = expiresAt
 	f.rows[id] = j
+	if p, ok := f.payments[id]; ok && p.Status == store.PaymentCreated {
+		p.Status = store.PaymentPaid
+		p.RazorpayPaymentID = razorpayPaymentID
+		f.payments[id] = p
+	}
 	return j, nil
+}
+
+func (f *fakeJobs) PaymentByJob(jobID string) (store.Payment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.payments[jobID]
+	if !ok {
+		return store.Payment{}, store.ErrPaymentNotFound
+	}
+	return p, nil
+}
+
+func (f *fakeJobs) SavePaymentOrder(jobID string, amountPaise int, razorpayOrderID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.payments == nil {
+		f.payments = make(map[string]store.Payment)
+	}
+	p, ok := f.payments[jobID]
+	if !ok {
+		p = store.Payment{ID: "pmt-" + jobID, JobID: jobID, AmountPaise: amountPaise, Status: store.PaymentCreated}
+	}
+	if p.Status == store.PaymentCreated {
+		p.RazorpayOrderID = razorpayOrderID
+	}
+	f.payments[jobID] = p
+	return nil
+}
+
+func (f *fakeJobs) RefundablePayments() ([]store.RefundablePayment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []store.RefundablePayment
+	for jobID, p := range f.payments {
+		j, ok := f.rows[jobID]
+		if !ok || p.Status != store.PaymentPaid {
+			continue
+		}
+		if j.State == store.JobExpired || j.State == "failed" {
+			out = append(out, store.RefundablePayment{
+				PaymentID: p.ID, JobID: jobID, JobState: j.State,
+				RazorpayPaymentID: p.RazorpayPaymentID, AmountPaise: p.AmountPaise,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeJobs) MarkRefunded(paymentID, reason, gatewayRefundID, status string, amountPaise int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for jobID, p := range f.payments {
+		if p.ID == paymentID && p.Status == store.PaymentPaid {
+			p.Status = store.PaymentRefunded
+			f.payments[jobID] = p
+			if f.refunds == nil {
+				f.refunds = make(map[string]int)
+			}
+			f.refunds[paymentID]++
+		}
+	}
+	return nil
 }
 
 func (f *fakeJobs) SetSHA(id, sha string) error {
@@ -136,15 +204,11 @@ func (f *fakeJobs) ClaimCodeActive(shopID, claimCode string) (bool, error) {
 func (f *fakeJobs) ExpireDue(now time.Time) ([]store.ExpiredJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.refunds == nil {
-		f.refunds = make(map[string]int)
-	}
 	var expired []store.ExpiredJob
 	for id, j := range f.rows {
 		if (j.State == store.JobPaid || j.State == store.JobHeld) && j.ExpiresAt.Before(now) {
 			j.State = store.JobExpired
 			f.rows[id] = j
-			f.refunds[id]++
 			expired = append(expired, store.ExpiredJob{ID: j.ID, ShopID: j.ShopID})
 		}
 	}
@@ -153,7 +217,7 @@ func (f *fakeJobs) ExpireDue(now time.Time) ([]store.ExpiredJob, error) {
 
 func uploadApp(shops Shops, jobs Jobs) *fiber.App {
 	app := fiber.New()
-	h := NewHandlers(shops, jobs)
+	h := NewHandlers(shops, jobs, &fakeGateway{})
 	app.Post("/upload", h.Upload)
 	return app
 }

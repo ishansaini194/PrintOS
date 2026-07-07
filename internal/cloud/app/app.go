@@ -11,6 +11,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 
 	"github.com/ishansaini194/PrintOS/internal/cloud/api"
+	"github.com/ishansaini194/PrintOS/internal/cloud/razorpay"
 	"github.com/ishansaini194/PrintOS/internal/cloud/server"
 	"github.com/ishansaini194/PrintOS/internal/cloud/store"
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
@@ -34,9 +35,13 @@ func New() (*server.Server, error) {
 	// 3. Build the server and register routes.
 	srv := server.New(db)
 	jobs := store.NewJobStore(db)
-	h := api.NewHandlers(store.NewShops(db), jobs)
+	pay := razorpay.NewFromEnv()
+	if pay.KeyID() == "" {
+		log.Println("WARNING: RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET not set — payments will fail until configured")
+	}
+	h := api.NewHandlers(store.NewShops(db), jobs, pay)
 	registerRoutes(srv, h)
-	api.StartExpirySweeper(jobs, make(chan struct{}))
+	api.StartExpirySweeper(jobs, pay, make(chan struct{}))
 	return srv, nil
 }
 
@@ -73,9 +78,11 @@ func registerRoutes(srv *server.Server, h *api.Handlers) {
 	// price and claim code; nothing reaches the agent until payment.
 	app.Post("/upload", h.Upload)
 
-	// Payment confirmation (STUB — real gateway later): marks the job paid and
+	// Payment: create the Razorpay order for checkout, then verify the
+	// checkout signature — only a valid signature marks the job paid and
 	// pushes it to the shop's agent, which holds it.
-	app.Post("/pay/confirm", h.PayConfirm)
+	app.Post("/pay/order", h.PayOrder)
+	app.Post("/pay/verify", h.PayVerify)
 
 	// Release: the claim code typed at the shop prints the held job.
 	app.Post("/release", h.Release)

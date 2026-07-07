@@ -43,7 +43,7 @@ func (f *fakeShops) IsActive(shopID string) (bool, error) {
 
 func provisionApp(shops Shops) *fiber.App {
 	app := fiber.New()
-	h := NewHandlers(shops, nil)
+	h := NewHandlers(shops, nil, nil)
 	app.Post("/agent/provision", h.Provision)
 	return app
 }
