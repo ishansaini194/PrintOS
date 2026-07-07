@@ -72,7 +72,7 @@ func pushJobToAgent(job store.Job) error {
 		IdempotencyKey: job.IdempotencyKey,
 		Mode:           protocol.ModeRelease,
 		ClaimCode:      job.ClaimCode,
-		PDFURL:         publicURL() + "/jobs/" + job.ID + "/pdf",
+		PDFURL:         publicLink("/jobs/" + job.ID + "/pdf"),
 		PDFSHA256:      job.PDFSHA256,
 		Settings: protocol.PrintSettings{
 			Color:     protocol.ColorMode(job.Type),

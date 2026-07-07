@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"sync"
 
 	"github.com/gofiber/contrib/websocket"
@@ -118,12 +117,4 @@ func (h *Handlers) handleEnvelope(shopID string, env protocol.Envelope) {
 	default:
 		log.Printf("[%s] unknown message type: %s", shopID, env.Type)
 	}
-}
-
-// publicURL is the base URL the agent uses to reach the cloud for downloads.
-func publicURL() string {
-	if v := os.Getenv("PRINTOS_PUBLIC_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
 }
