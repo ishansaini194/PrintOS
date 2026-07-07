@@ -33,8 +33,10 @@ func New() (*server.Server, error) {
 
 	// 3. Build the server and register routes.
 	srv := server.New(db)
-	h := api.NewHandlers(store.NewShops(db), store.NewJobStore(db))
+	jobs := store.NewJobStore(db)
+	h := api.NewHandlers(store.NewShops(db), jobs)
 	registerRoutes(srv, h)
+	api.StartExpirySweeper(jobs, make(chan struct{}))
 	return srv, nil
 }
 

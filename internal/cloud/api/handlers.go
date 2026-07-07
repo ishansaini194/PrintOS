@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -26,11 +27,13 @@ type Shops interface {
 type Jobs interface {
 	Create(p store.NewJob) (store.Job, error)
 	Get(id string) (store.Job, error)
+	MarkPaid(id string, expiresAt time.Time) (store.Job, error)
 	SetState(id, state string) error
 	SetSHA(id, sha string) error
 	MarkHeld(id string) error
 	FindReleasable(shopID, claimCode string) (store.Job, error)
 	ClaimCodeActive(shopID, claimCode string) (bool, error)
+	ExpireDue(now time.Time) ([]store.ExpiredJob, error)
 }
 
 // Handlers bundles the DB-backed HTTP/WebSocket handlers.

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/ishansaini194/PrintOS/internal/cloud/store"
+	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
 
 func payReleaseApp(jobs Jobs) *fiber.App {
@@ -76,6 +78,23 @@ func TestPayConfirmMarksPaid(t *testing.T) {
 	}
 }
 
+func TestPayConfirmResetsHoldExpiry(t *testing.T) {
+	t.Setenv("PRINTOS_HOLD_TTL", "30m")
+	jobs := &fakeJobs{}
+	app := payReleaseApp(jobs)
+	j := seedJob(t, jobs, "121212", store.JobAwaitingPayment)
+
+	before := time.Now().UTC()
+	status, _ := postJSON(t, app, "/pay/confirm", `{"job_id":"`+j.ID+`"}`)
+	if status != fiber.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (shop offline)", status)
+	}
+	got, _ := jobs.Get(j.ID)
+	if got.ExpiresAt.Before(before.Add(29*time.Minute)) || got.ExpiresAt.After(before.Add(31*time.Minute)) {
+		t.Fatalf("expires_at = %s, want about 30m from pay confirm", got.ExpiresAt)
+	}
+}
+
 func TestPayConfirmUnknownJob(t *testing.T) {
 	app := payReleaseApp(&fakeJobs{})
 	if status, _ := postJSON(t, app, "/pay/confirm", `{"job_id":"nope"}`); status != fiber.StatusNotFound {
@@ -127,6 +146,96 @@ func TestReleaseHeldJobAgentOffline(t *testing.T) {
 	status, _ := postJSON(t, app, "/release", `{"shop_id":"s1","code":"`+j.ClaimCode+`"}`)
 	if status != fiber.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 when shop agent offline", status)
+	}
+}
+
+func TestReleaseExpiredJobRefused(t *testing.T) {
+	jobs := &fakeJobs{}
+	app := payReleaseApp(jobs)
+	j := seedJob(t, jobs, "565656", store.JobHeld)
+	j.ExpiresAt = time.Now().Add(-time.Minute).UTC()
+	jobs.rows[j.ID] = j
+
+	status, _ := postJSON(t, app, "/release", `{"shop_id":"s1","code":"`+j.ClaimCode+`"}`)
+	if status != fiber.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for expired job", status)
+	}
+}
+
+func TestSweepExpiredJobsRefundsOnce(t *testing.T) {
+	jobs := &fakeJobs{}
+	j := seedJob(t, jobs, "575757", store.JobHeld)
+	j.ExpiresAt = time.Now().Add(-time.Minute).UTC()
+	jobs.rows[j.ID] = j
+
+	if err := SweepExpiredJobs(jobs, time.Now().UTC()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	got, _ := jobs.Get(j.ID)
+	if got.State != store.JobExpired {
+		t.Fatalf("state = %q, want expired", got.State)
+	}
+	if jobs.refunds[j.ID] != 1 {
+		t.Fatalf("refund count = %d, want 1", jobs.refunds[j.ID])
+	}
+
+	if err := SweepExpiredJobs(jobs, time.Now().UTC()); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if jobs.refunds[j.ID] != 1 {
+		t.Fatalf("refund count after second sweep = %d, want 1", jobs.refunds[j.ID])
+	}
+}
+
+func TestSweepExpiredJobsSendsCancel(t *testing.T) {
+	jobs := &fakeJobs{}
+	j := seedJob(t, jobs, "585858", store.JobHeld)
+	j.ExpiresAt = time.Now().Add(-time.Minute).UTC()
+	jobs.rows[j.ID] = j
+
+	var sentShop string
+	var sent protocol.Envelope
+	oldSend := sendToAgent
+	sendToAgent = func(shopID string, env protocol.Envelope) error {
+		sentShop = shopID
+		sent = env
+		return nil
+	}
+	defer func() { sendToAgent = oldSend }()
+
+	if err := SweepExpiredJobs(jobs, time.Now().UTC()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if sentShop != j.ShopID || sent.Type != protocol.MsgCancel {
+		t.Fatalf("sent shop/type = %q/%q, want %q/cancel", sentShop, sent.Type, j.ShopID)
+	}
+	var msg protocol.CancelMsg
+	if err := json.Unmarshal(sent.Payload, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.JobID != j.ID {
+		t.Fatalf("cancel job_id = %q, want %q", msg.JobID, j.ID)
+	}
+}
+
+func TestSweepExpiredJobsIgnoresOfflineAgent(t *testing.T) {
+	jobs := &fakeJobs{}
+	j := seedJob(t, jobs, "595959", store.JobHeld)
+	j.ExpiresAt = time.Now().Add(-time.Minute).UTC()
+	jobs.rows[j.ID] = j
+
+	oldSend := sendToAgent
+	sendToAgent = func(shopID string, env protocol.Envelope) error {
+		return errors.New("offline")
+	}
+	defer func() { sendToAgent = oldSend }()
+
+	if err := SweepExpiredJobs(jobs, time.Now().UTC()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	got, _ := jobs.Get(j.ID)
+	if got.State != store.JobExpired || jobs.refunds[j.ID] != 1 {
+		t.Fatalf("got state=%q refunds=%d, want expired/refunded once", got.State, jobs.refunds[j.ID])
 	}
 }
 

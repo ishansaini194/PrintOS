@@ -32,10 +32,15 @@ func (h *Handlers) PayConfirm(c *fiber.Ctx) error {
 
 	switch job.State {
 	case store.JobAwaitingPayment:
-		if err := h.jobs.SetState(job.ID, store.JobPaid); err != nil {
+		job, err = h.jobs.MarkPaid(job.ID, time.Now().Add(holdTTL()).UTC())
+		if errors.Is(err, store.ErrNotFound) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "job is not payable (state changed)",
+			})
+		}
+		if err != nil {
 			return serverError(c, "could not mark job paid")
 		}
-		job.State = store.JobPaid
 	case store.JobPaid, store.JobHeld:
 		// Already paid: re-confirming is idempotent — re-push below; the agent
 		// dedupes on the idempotency key and will simply re-ack.

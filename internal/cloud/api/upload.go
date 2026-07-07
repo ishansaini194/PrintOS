@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,9 +19,6 @@ import (
 	"github.com/ishansaini194/PrintOS/internal/cloud/store"
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
-
-// jobTTL is how long a created job stays valid before expiring.
-const jobTTL = 2 * time.Hour
 
 // Placeholder per-page rates in paise (₹2 mono, ₹10 color). Business will tune
 // these later — keep every rate in this one block.
@@ -56,21 +54,32 @@ func pdfDir() string {
 // (POST /pay/confirm).
 func (h *Handlers) Upload(c *fiber.Ctx) error {
 	shopID := c.FormValue("shop_id")
+
+	// bad logs the exact reason a 400 is returned (with whatever shop/file
+	// context is known so far) before replying, so a failed upload leaves a
+	// clear line in the cloud terminal.
+	var filename string
+	bad := func(reason string) error {
+		log.Printf("/upload 400: %s (shop=%s, file=%s)", reason, shopID, filename)
+		return badRequest(c, reason)
+	}
+
 	if shopID == "" {
-		return badRequest(c, "shop_id required")
+		return bad("shop_id required")
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return badRequest(c, "file required")
+		return bad("file required")
 	}
+	filename = fileHeader.Filename
 	if fileHeader.Size > render.MaxUploadBytes {
-		return badRequest(c, "file too large")
+		return bad("file too large")
 	}
 
 	active, err := h.shops.IsActive(shopID)
 	if err != nil || !active {
-		return badRequest(c, "unknown or inactive shop")
+		return bad("unknown or inactive shop")
 	}
 
 	settings := parseSettings(c)
@@ -92,11 +101,11 @@ func (h *Handlers) Upload(c *fiber.Ctx) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, render.ErrTooLarge):
-			return badRequest(c, "file too large")
+			return bad("file too large")
 		case errors.Is(err, render.ErrUnsupported):
-			return badRequest(c, "unsupported file type")
+			return bad("unsupported file type")
 		default:
-			return badRequest(c, "could not process file")
+			return bad(fmt.Sprintf("normalize failed: %v", err))
 		}
 	}
 	defer cleanup()
@@ -117,7 +126,7 @@ func (h *Handlers) Upload(c *fiber.Ctx) error {
 
 	// Create the job row (awaiting payment), then persist the PDF as
 	// <job_id>.pdf and record its checksum for the eventual agent push.
-	expires := time.Now().Add(jobTTL).UTC()
+	expires := time.Now().Add(holdTTL()).UTC()
 	job, err := h.jobs.Create(store.NewJob{
 		ShopID:         shopID,
 		IdempotencyKey: genIdempotencyKey(),

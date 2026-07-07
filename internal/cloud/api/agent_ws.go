@@ -46,6 +46,8 @@ func PushToAgent(shopID string, env protocol.Envelope) error {
 	return c.WriteMessage(websocket.TextMessage, data)
 }
 
+var sendToAgent = PushToAgent
+
 // AgentSocket handles one connected agent's WebSocket.
 func (h *Handlers) AgentSocket(c *websocket.Conn) {
 	shopID := "" // set once a valid hello message arrives

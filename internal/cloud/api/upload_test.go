@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -17,8 +18,9 @@ import (
 
 // fakeJobs is an in-memory Jobs for testing, mirroring the store's semantics.
 type fakeJobs struct {
-	mu   sync.Mutex
-	rows map[string]store.Job
+	mu      sync.Mutex
+	rows    map[string]store.Job
+	refunds map[string]int
 }
 
 func (f *fakeJobs) Create(p store.NewJob) (store.Job, error) {
@@ -68,6 +70,19 @@ func (f *fakeJobs) SetState(id, state string) error {
 	return nil
 }
 
+func (f *fakeJobs) MarkPaid(id string, expiresAt time.Time) (store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.rows[id]
+	if !ok || j.State != store.JobAwaitingPayment {
+		return store.Job{}, store.ErrNotFound
+	}
+	j.State = store.JobPaid
+	j.ExpiresAt = expiresAt
+	f.rows[id] = j
+	return j, nil
+}
+
 func (f *fakeJobs) SetSHA(id, sha string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -93,9 +108,11 @@ func (f *fakeJobs) MarkHeld(id string) error {
 func (f *fakeJobs) FindReleasable(shopID, claimCode string) (store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().UTC()
 	for _, j := range f.rows {
 		if j.ShopID == shopID && j.ClaimCode == claimCode &&
-			(j.State == store.JobPaid || j.State == store.JobHeld) {
+			(j.State == store.JobPaid || j.State == store.JobHeld) &&
+			j.ExpiresAt.After(now) {
 			return j, nil
 		}
 	}
@@ -105,13 +122,33 @@ func (f *fakeJobs) FindReleasable(shopID, claimCode string) (store.Job, error) {
 func (f *fakeJobs) ClaimCodeActive(shopID, claimCode string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().UTC()
 	for _, j := range f.rows {
 		if j.ShopID == shopID && j.ClaimCode == claimCode &&
-			j.State != "done" && j.State != "failed" {
+			j.State != "done" && j.State != "failed" && j.State != store.JobExpired &&
+			j.ExpiresAt.After(now) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func (f *fakeJobs) ExpireDue(now time.Time) ([]store.ExpiredJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.refunds == nil {
+		f.refunds = make(map[string]int)
+	}
+	var expired []store.ExpiredJob
+	for id, j := range f.rows {
+		if (j.State == store.JobPaid || j.State == store.JobHeld) && j.ExpiresAt.Before(now) {
+			j.State = store.JobExpired
+			f.rows[id] = j
+			f.refunds[id]++
+			expired = append(expired, store.ExpiredJob{ID: j.ID, ShopID: j.ShopID})
+		}
+	}
+	return expired, nil
 }
 
 func uploadApp(shops Shops, jobs Jobs) *fiber.App {
