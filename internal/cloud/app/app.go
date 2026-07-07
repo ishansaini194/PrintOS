@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 
 	"github.com/ishansaini194/PrintOS/internal/cloud/api"
 	"github.com/ishansaini194/PrintOS/internal/cloud/server"
@@ -40,6 +41,17 @@ func New() (*server.Server, error) {
 // registerRoutes mounts all HTTP/WebSocket endpoints on the server.
 func registerRoutes(srv *server.Server, h *api.Handlers) {
 	app := srv.App
+
+	// CORS: the browser UI is served from a different origin than the cloud, so
+	// it needs an explicit Access-Control-Allow-Origin. Kept to known origins
+	// (configurable via PRINTOS_CORS_ORIGIN) rather than "*" because uploads and
+	// later auth make a wildcard unsafe. OPTIONS is allowed for the preflight the
+	// browser sends before a POST. Registered before routes so it covers them all.
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: env("PRINTOS_CORS_ORIGIN", "http://localhost:5173"),
+		AllowMethods: "GET,POST,OPTIONS",
+		AllowHeaders: "Content-Type",
+	}))
 
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -87,4 +99,12 @@ func registerRoutes(srv *server.Server, h *api.Handlers) {
 		}
 		return c.SendFile(path)
 	})
+}
+
+// env returns the environment variable or a fallback default.
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
