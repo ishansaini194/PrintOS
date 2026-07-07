@@ -12,6 +12,7 @@ const (
 	// Cloud → Agent
 	MsgJobPush   MessageType = "job_push"
 	MsgRelease   MessageType = "release" // print a held job (claim code was typed)
+	MsgCancel    MessageType = "cancel"  // drop an expired held job
 	MsgResolve   MessageType = "resolve"
 	MsgUpdateNow MessageType = "update_now"
 
@@ -43,6 +44,11 @@ type JobPushMsg struct {
 // ReleaseMsg tells the agent to print a held job — sent when someone types the
 // job's claim code on the shop's release page.
 type ReleaseMsg struct {
+	JobID string `json:"job_id"`
+}
+
+// CancelMsg tells the agent to drop an expired held job.
+type CancelMsg struct {
 	JobID string `json:"job_id"`
 }
 

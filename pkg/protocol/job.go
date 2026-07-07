@@ -11,6 +11,7 @@ const (
 	StateDone      JobState = "done"
 	StateFailed    JobState = "failed"
 	StateUncertain JobState = "uncertain"
+	StateExpired   JobState = "expired"
 )
 
 // DefaultJobType is used when a job arrives without an explicit Type. Every shop

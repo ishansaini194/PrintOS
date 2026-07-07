@@ -7,7 +7,7 @@ import (
 )
 
 func TestJobStateValidity(t *testing.T) {
-	valid := []JobState{StateHeld, StateQueued, StatePrinting, StateDone, StateFailed, StateUncertain}
+	valid := []JobState{StateHeld, StateQueued, StatePrinting, StateDone, StateFailed, StateUncertain, StateExpired}
 	for _, s := range valid {
 		if string(s) == "" {
 			t.Errorf("state %q empty", s)
@@ -100,6 +100,32 @@ func TestReleaseMsgRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCancelMsgRoundTrip(t *testing.T) {
+	payload, err := json.Marshal(CancelMsg{JobID: "j1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{Type: MsgCancel, ProtocolVersion: Version, SentAt: time.Now().UTC(), Payload: payload}
+	b, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotEnv Envelope
+	if err := json.Unmarshal(b, &gotEnv); err != nil {
+		t.Fatal(err)
+	}
+	if gotEnv.Type != MsgCancel {
+		t.Errorf("type = %q, want cancel", gotEnv.Type)
+	}
+	var got CancelMsg
+	if err := json.Unmarshal(gotEnv.Payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.JobID != "j1" {
+		t.Errorf("job_id = %q, want j1", got.JobID)
+	}
+}
+
 func TestJobModeRoundTrip(t *testing.T) {
 	b, err := json.Marshal(Job{ID: "j1", Mode: ModeRelease})
 	if err != nil {
@@ -155,6 +181,7 @@ func TestMessageRoundTrips(t *testing.T) {
 		HeartbeatMsg{AgentVersion: "1.0.0", PrinterStatus: PrinterReady, QueueDepth: 0, At: time.Now().UTC()},
 		ReportProblemMsg{JobID: "j1", ClaimCode: "A7"},
 		ResolveMsg{JobID: "j1", Resolution: StateDone, ByOwner: true},
+		CancelMsg{JobID: "j1"},
 	}
 	for i, m := range msgs {
 		b, err := json.Marshal(m)
