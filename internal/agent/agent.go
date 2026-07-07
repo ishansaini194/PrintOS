@@ -147,6 +147,12 @@ func (a *Agent) handle(env protocol.Envelope) error {
 			return err
 		}
 		a.releaseJob(msg.JobID)
+	case protocol.MsgCancel:
+		var msg protocol.CancelMsg
+		if err := json.Unmarshal(env.Payload, &msg); err != nil {
+			return err
+		}
+		a.cancelJob(msg.JobID)
 	}
 	return nil
 }
@@ -165,6 +171,20 @@ func (a *Agent) releaseJob(jobID string) {
 		return
 	}
 	log.Printf("released job %s to print queue", jobID)
+}
+
+// cancelJob drops a held job after the cloud expires and refunds it.
+func (a *Agent) cancelJob(jobID string) {
+	ok, err := a.queue.CancelHeld(jobID)
+	if err != nil {
+		log.Printf("cancel job %s: %v", jobID, err)
+		return
+	}
+	if !ok {
+		log.Printf("cancel job %s: no held job with that id", jobID)
+		return
+	}
+	log.Printf("cancelled held job %s", jobID)
 }
 
 // persistJob writes a pushed job to the queue and acks it. It does NOT print —

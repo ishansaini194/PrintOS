@@ -57,6 +57,20 @@ func releaseEnvelope(t *testing.T, jobID string) protocol.Envelope {
 	}
 }
 
+func cancelEnvelope(t *testing.T, jobID string) protocol.Envelope {
+	t.Helper()
+	payload, err := json.Marshal(protocol.CancelMsg{JobID: jobID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return protocol.Envelope{
+		Type:            protocol.MsgCancel,
+		ProtocolVersion: protocol.Version,
+		SentAt:          time.Now().UTC(),
+		Payload:         payload,
+	}
+}
+
 // TestHoldThenReleasePrintsConcurrently drives the v1 flow end-to-end on the
 // agent: two release-mode jobs (one mono, one color) arrive and are HELD — the
 // running workers must not print them. After the release messages arrive, both
@@ -131,6 +145,38 @@ func TestHoldThenReleasePrintsConcurrently(t *testing.T) {
 	}
 
 	assertOverlappingPrints(t, logPath)
+}
+
+func TestCancelDropsHeldJob(t *testing.T) {
+	q, err := queue.Open(filepath.Join(t.TempDir(), "agent.db"))
+	if err != nil {
+		t.Fatalf("open queue: %v", err)
+	}
+	defer q.Close()
+
+	a := New(Config{}, q, printer.New(""), nil)
+	a.persistJob(protocol.Job{
+		ID:             "held1",
+		Mode:           protocol.ModeRelease,
+		Type:           "mono",
+		IdempotencyKey: "kh",
+		ExpiresAt:      time.Now().Add(time.Hour).UTC(),
+	})
+	pending, err := q.Pending()
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending before cancel: got %d err %v, want 1", len(pending), err)
+	}
+
+	if err := a.handle(cancelEnvelope(t, "held1")); err != nil {
+		t.Fatalf("cancel held1: %v", err)
+	}
+	pending, err = q.Pending()
+	if err != nil {
+		t.Fatalf("pending after cancel: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending after cancel = %d, want 0", len(pending))
+	}
 }
 
 // waitDrained polls until no jobs remain queued/printing, or fails after timeout.

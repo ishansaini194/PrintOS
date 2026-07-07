@@ -82,12 +82,67 @@ func (q *Queue) Enqueue(job protocol.Job) error {
 // id exists (already released, already printed, or unknown) — releasing twice is
 // harmless.
 func (q *Queue) Release(jobID string) (bool, error) {
+	return q.releaseAt(jobID, time.Now().UTC())
+}
+
+func (q *Queue) releaseAt(jobID string, now time.Time) (bool, error) {
+	payload, err := q.heldPayload(jobID)
+	if err != nil {
+		return false, err
+	}
+	if payload == "" {
+		return false, nil
+	}
+	var job protocol.Job
+	if err := json.Unmarshal([]byte(payload), &job); err != nil {
+		return false, fmt.Errorf("unmarshal held job %s: %w", jobID, err)
+	}
+	if !job.ExpiresAt.IsZero() && !job.ExpiresAt.After(now) {
+		if _, err := q.CancelHeld(jobID); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
 	res, err := q.db.Exec(
 		`UPDATE jobs SET state = ?, updated_at = ? WHERE id = ? AND state = ?`,
-		string(protocol.StateQueued), time.Now().UTC(), jobID, string(protocol.StateHeld),
+		string(protocol.StateQueued), now, jobID, string(protocol.StateHeld),
 	)
 	if err != nil {
 		return false, fmt.Errorf("release job %s: %w", jobID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (q *Queue) heldPayload(jobID string) (string, error) {
+	var payload string
+	err := q.db.QueryRow(
+		`SELECT payload FROM jobs WHERE id = ? AND state = ?`,
+		jobID, string(protocol.StateHeld),
+	).Scan(&payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("load held job %s: %w", jobID, err)
+	default:
+		return payload, nil
+	}
+}
+
+// CancelHeld marks a still-held job terminally expired. Unknown, already
+// released, printing or completed jobs are left untouched and reported as no-op.
+func (q *Queue) CancelHeld(jobID string) (bool, error) {
+	res, err := q.db.Exec(
+		`UPDATE jobs SET state = ?, updated_at = ? WHERE id = ? AND state = ?`,
+		string(protocol.StateExpired), time.Now().UTC(), jobID, string(protocol.StateHeld),
+	)
+	if err != nil {
+		return false, fmt.Errorf("cancel held job %s: %w", jobID, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {

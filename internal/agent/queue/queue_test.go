@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ishansaini194/PrintOS/pkg/protocol"
 )
@@ -204,6 +205,51 @@ func TestReleaseMovesHeldToQueued(t *testing.T) {
 	}
 	if ok, err := q.Release("nope"); err != nil || ok {
 		t.Errorf("unknown release: ok=%v err=%v, want false", ok, err)
+	}
+}
+
+func TestCancelHeldDropsFromPending(t *testing.T) {
+	q := newTestQueue(t)
+	if err := q.Enqueue(heldJob("h1", "kh", "mono")); err != nil {
+		t.Fatalf("enqueue held: %v", err)
+	}
+	ok, err := q.CancelHeld("h1")
+	if err != nil || !ok {
+		t.Fatalf("CancelHeld: ok=%v err=%v, want cancelled", ok, err)
+	}
+	pending, err := q.Pending()
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending after cancel = %d, want 0", len(pending))
+	}
+	if ok, err := q.CancelHeld("h1"); err != nil || ok {
+		t.Fatalf("CancelHeld again: ok=%v err=%v, want no-op", ok, err)
+	}
+}
+
+func TestReleaseExpiredHeldJobRefused(t *testing.T) {
+	q := newTestQueue(t)
+	ctx := context.Background()
+	j := heldJob("h1", "kh", "mono")
+	j.ExpiresAt = time.Now().Add(-time.Minute).UTC()
+	if err := q.Enqueue(j); err != nil {
+		t.Fatalf("enqueue held: %v", err)
+	}
+	ok, err := q.Release("h1")
+	if err != nil || ok {
+		t.Fatalf("Release expired: ok=%v err=%v, want no-op", ok, err)
+	}
+	if got, err := q.GetNext(ctx, "mono"); err != nil || got != nil {
+		t.Fatalf("GetNext after expired release: got %+v err %v, want nil", got, err)
+	}
+	pending, err := q.Pending()
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending after expired release = %d, want 0", len(pending))
 	}
 }
 
