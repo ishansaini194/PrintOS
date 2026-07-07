@@ -7,6 +7,7 @@ require (
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
+	github.com/kardianos/service v1.3.0
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.2
 	modernc.org/sqlite v1.53.0
