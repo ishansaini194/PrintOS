@@ -1,0 +1,61 @@
+# PrintOS — test-only compose (single droplet, localhost-bound).
+# Brings up a dedicated PrintOS Postgres and the cloud backend on a private
+# network. Nothing is exposed publicly: both published ports bind to 127.0.0.1.
+
+services:
+  db:
+    image: postgres:16
+    # Dedicated PrintOS database — distinct creds from other projects on the box.
+    environment:
+      POSTGRES_DB: printos
+      POSTGRES_USER: printos
+      POSTGRES_PASSWORD: printos
+    # Localhost-only, port 5434 to avoid the lms-db-1 clash on 5433. This is
+    # only so the operator can psql by hand; container-to-container traffic
+    # uses the service name on the private network instead.
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - printos-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U printos -d printos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - printos-net
+
+  cloud:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    # Container-network values live here (not .env) so they can't drift from the
+    # db service creds and the volume mount below. These win over env_file:
+    #  - DB_*: reach Postgres by service name with the dedicated printos creds.
+    #  - PRINTOS_PDF_DIR: must equal the printos-pdfs mount path.
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: printos
+      DB_PASSWORD: printos
+      DB_NAME: printos
+      PRINTOS_PDF_DIR: /data/pdfs
+    # Localhost-only — test scope, never 0.0.0.0.
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Persistent PDF storage — must match PRINTOS_PDF_DIR in .env.
+    volumes:
+      - printos-pdfs:/data/pdfs
+    networks:
+      - printos-net
+
+volumes:
+  printos-db-data:
+  printos-pdfs:
+
+networks:
+  printos-net:
