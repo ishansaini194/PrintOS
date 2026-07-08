@@ -33,7 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice \
         imagemagick \
         libheif-examples \
+        libheif-plugin-libde265 \
         poppler-utils \
+        ghostscript \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
