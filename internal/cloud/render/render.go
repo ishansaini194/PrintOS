@@ -6,7 +6,7 @@
 // System tools required on the cloud host:
 //   - gs       (Ghostscript)  — PDF optimize
 //   - soffice  (LibreOffice)  — Office/text/image → PDF
-//   - heif-convert or convert (ImageMagick) — HEIC → JPG/PNG
+//   - heif-convert or convert (ImageMagick) — HEIC/WEBP/TIFF/BMP/GIF → JPG
 //   - pdfinfo  (Poppler)      — page count (for pricing)
 package render
 
@@ -51,6 +51,17 @@ var officeExts = map[string]bool{
 // imageExts are also handled by LibreOffice (it can lay an image onto a page).
 var imageExts = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true,
+}
+
+// imageMagickExts are raster images that LibreOffice handles unreliably, so we
+// route them through ImageMagick (convert → clean JPG) before laying the JPG
+// onto a PDF — the same proven path HEIC uses. Kept as an explicit allow-list:
+// ImageMagick has a CVE history with untrusted input, so we never "try anything".
+var imageMagickExts = map[string]bool{
+	".webp": true,
+	".tiff": true, ".tif": true,
+	".bmp": true,
+	".gif": true,
 }
 
 // maxUploadBytes returns the effective limit, honoring the env override.
@@ -99,9 +110,9 @@ func Normalize(inputPath string) (outputPath string, cleanup func(), err error) 
 		pdfPath = inputPath
 	case kindOffice, kindImage:
 		pdfPath, err = convertToPDF(inputPath, workDir)
-	case kindHEIC:
+	case kindRasterImage:
 		var img string
-		if img, err = heicToImage(inputPath, workDir); err == nil {
+		if img, err = rasterToImage(inputPath, workDir); err == nil {
 			pdfPath, err = convertToPDF(img, workDir)
 		}
 	default:
@@ -128,7 +139,7 @@ const (
 	kindPDF
 	kindOffice
 	kindImage
-	kindHEIC
+	kindRasterImage // HEIC/WEBP/TIFF/BMP/GIF → JPG via ImageMagick
 )
 
 // detectKind classifies the file by extension AND content sniffing — the
@@ -148,8 +159,11 @@ func detectKind(path string) (kind, error) {
 			return kindUnknown, ErrUnsupported // extension lies about content
 		}
 		return kindPDF, nil
-	case ext == ".heic":
-		return kindHEIC, nil // http sniff can't ID HEIC; trust the extension here
+	case ext == ".heic" || imageMagickExts[ext]:
+		// http sniff can't ID HEIC or TIFF, and these all go through ImageMagick's
+		// dedicated decoder anyway; the explicit allow-list is the real gate, so
+		// trust the extension here (matching the existing HEIC behavior).
+		return kindRasterImage, nil
 	case imageExts[ext]:
 		if !strings.HasPrefix(sniff, "image/") {
 			return kindUnknown, ErrUnsupported
@@ -191,20 +205,25 @@ func convertToPDF(in, outDir string) (string, error) {
 	return out, nil
 }
 
-// heicToImage converts a HEIC file to a JPG in outDir, returning its path.
-func heicToImage(in, outDir string) (string, error) {
-	out := filepath.Join(outDir, "heic.jpg")
-	if err := runTool("heif-convert", in, out); err == nil {
-		if _, statErr := os.Stat(out); statErr == nil {
-			return out, nil
+// rasterToImage converts a raster image (HEIC, WEBP, TIFF, BMP, GIF, ...) to a
+// clean JPG in outDir via ImageMagick, returning its path. For HEIC it prefers
+// heif-convert when available (better HEIC decoding), falling back to convert;
+// the other formats go straight to convert, which handles them reliably.
+func rasterToImage(in, outDir string) (string, error) {
+	out := filepath.Join(outDir, "raster.jpg")
+	if strings.ToLower(filepath.Ext(in)) == ".heic" {
+		if err := runTool("heif-convert", in, out); err == nil {
+			if _, statErr := os.Stat(out); statErr == nil {
+				return out, nil
+			}
 		}
 	}
-	// Fall back to ImageMagick if heif-convert is unavailable or failed.
+	// ImageMagick handles HEIC (fallback) and every imageMagickExts format.
 	if err := runTool("convert", in, out); err != nil {
 		return "", err
 	}
 	if _, err := os.Stat(out); err != nil {
-		return "", fmt.Errorf("%w: heic conversion produced no output", ErrConvertFailed)
+		return "", fmt.Errorf("%w: image conversion produced no output", ErrConvertFailed)
 	}
 	return out, nil
 }
